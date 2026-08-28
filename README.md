@@ -80,6 +80,7 @@ queue at any time.
 | `show ID [--json]` | metadata + full note |
 | `next [--claim --assignee NAME] [--json]` | best ready task (open, unblocked, priority-ordered); exit 1 if none |
 | `claim ID --assignee NAME [--force]` | atomically claim an open, unblocked task |
+| `heartbeat ID --assignee NAME` | extend your claim's lease during long steps |
 | `status ID STATUS` | set status: `open`, `in_progress`, `review`, `done`, `cancelled` |
 | `done ID [--summary]` | mark done (reviewer's call, not the worker's) |
 | `block ID BLOCKER...` / `unblock ID BLOCKER...` | manage blockers |
@@ -184,6 +185,12 @@ when it (or anything else) kills a worker anyway.
   task reaches `done`/`cancelled`; free text (*"waiting on API key from Ben"*)
   stays until explicitly removed — and doubles as a question channel back to
   the planner. `next`/`claim` refuse blocked tasks.
+- **Claims are leases, not locks.** `claim` stamps `claimed_at` +
+  `lease_until` (config `lease_minutes`, default 90). Workers `heartbeat`
+  during long steps; if a worker crashes, its lease simply expires and the
+  task becomes claimable again — `next`/`claim` steal it and record the steal
+  (old assignee, expiry time) in the work log. `board` shows expired-lease
+  tasks in their own bucket. No human unsticking required.
 - **Workers finish to `review`, never `done`.** Closing is the reviewer's
   (planner's or human's) call, after actually running the acceptance checks.
 - **Scope discipline**: a worker that finds adjacent work *creates a new task*

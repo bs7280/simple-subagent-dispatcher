@@ -18,7 +18,7 @@ import re
 import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 DIR_ENV = "AGENT_TASKS_DIR"
 AGENT_ENV = "AGENT_TASKS_AGENT"
@@ -45,6 +45,38 @@ def die(msg, code=1):
 
 def default_agent(explicit):
     return explicit or os.environ.get(AGENT_ENV) or "agent"
+
+
+CONFIG_DEFAULTS = {
+    "lease_minutes": 90,  # claim lease length; an expired lease is stealable
+}
+
+
+def load_config(root):
+    cfg = dict(CONFIG_DEFAULTS)
+    path = os.path.join(root, "config.json")
+    if os.path.isfile(path):
+        try:
+            with open(path) as f:
+                user = json.load(f)
+        except ValueError as e:
+            die(f"bad {path}: {e}")
+        for key in cfg:
+            if key in user:
+                cfg[key] = user[key]
+    return cfg
+
+
+def compute_lease(cfg):
+    delta = timedelta(minutes=float(cfg["lease_minutes"]))
+    return (datetime.now(timezone.utc) + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def lease_expired(task):
+    """A claim is a lease, not a lock: expired means legitimately stealable."""
+    return (task.get("status") == "in_progress"
+            and bool(task.get("lease_until"))
+            and task["lease_until"] < now())
 
 
 # ---------------------------------------------------------------- storage
@@ -161,6 +193,41 @@ def unresolved_blockers(index, task):
     return out
 
 
+def apply_claim(root, index, tid, assignee, cfg, force=False):
+    """Claim a task under an already-held Lock. Returns an error message, or
+    None on success. Open tasks and expired-lease tasks are claimable; a steal
+    of an expired lease is recorded in the work log."""
+    task = index["tasks"][tid]
+    stolen = None
+    if task["status"] == "open":
+        pass
+    elif lease_expired(task):
+        stolen = (task.get("assignee"), task.get("lease_until"))
+    elif not force:
+        msg = f"{tid} is {task['status']}, not open"
+        if task.get("assignee"):
+            msg += f" (assignee: {task['assignee']}"
+            if task.get("lease_until"):
+                msg += f", lease until {task['lease_until']}"
+            msg += ")"
+        return msg + " — use --force to take it anyway"
+    unresolved = unresolved_blockers(index, task)
+    if unresolved and not force:
+        return f"{tid} is blocked by: {', '.join(unresolved)} — use --force to override"
+    task["status"] = "in_progress"
+    task["assignee"] = assignee
+    task["claimed_at"] = now()
+    task["lease_until"] = compute_lease(cfg)
+    task["updated"] = now()
+    save_index(root, index)
+    set_note_status(root, tid, "in_progress")
+    if stolen:
+        append_log(root, tid, assignee,
+                   f"stole expired claim (was {stolen[0]}, lease expired {stolen[1]})")
+    append_log(root, tid, assignee, "claimed")
+    return None
+
+
 # ---------------------------------------------------------------- notes
 
 def note_path(root, tid):
@@ -230,6 +297,8 @@ def fmt_row(tid, task, unresolved):
             f"{assignee:<14} {task['title']}")
     if unresolved:
         line += f"  [blocked ← {', '.join(unresolved)}]"
+    if lease_expired(task):
+        line += "  [lease expired]"
     return line
 
 
@@ -237,6 +306,7 @@ def task_json(index, tid):
     task = dict(index["tasks"][tid])
     task["id"] = tid
     task["unresolved_blockers"] = unresolved_blockers(index, index["tasks"][tid])
+    task["lease_expired"] = lease_expired(index["tasks"][tid])
     return task
 
 
@@ -258,6 +328,7 @@ Machine-managed task queue shared by planner and worker agents
 - `config.json` — optional per-project dispatcher defaults (this is where a
   project records its own judgment calls). All keys optional:
   `worktree` (false), `worktree_root` (sibling `<repo>-worktrees/`),
+  `lease_minutes` (90 — claim lease length; expired claims are stealable),
   `model` (claude CLI default), `permission_mode` ("acceptEdits"),
   `allowed_tools` ([] — extra permission rules for what your workers may run),
   `bootstrap` (".claude/task-worker-bootstrap.sh"), `claude_bin` ("claude"),
@@ -353,6 +424,9 @@ def cmd_show(args):
         print(json.dumps(out, indent=2))
         return
     print(fmt_row(tid, task, unresolved_blockers(index, task)))
+    if task.get("lease_until"):
+        print(f"lease: until {task['lease_until']}"
+              + ("  (EXPIRED — claimable)" if lease_expired(task) else ""))
     if task.get("tags"):
         print(f"tags: {', '.join(task['tags'])}")
     print(f"note: {path}")
@@ -365,10 +439,12 @@ def cmd_show(args):
 
 
 def _ready_tasks(index):
-    """Open tasks with no unresolved blockers, best-first."""
+    """Claimable tasks (open, or in_progress with an expired lease) with no
+    unresolved blockers, best-first."""
     prio = {p: i for i, p in enumerate(PRIORITIES)}
     ready = [tid for tid, t in index["tasks"].items()
-             if t["status"] == "open" and not unresolved_blockers(index, t)]
+             if (t["status"] == "open" or lease_expired(t))
+             and not unresolved_blockers(index, t)]
     ready.sort(key=lambda t: (prio.get(index["tasks"][t].get("priority", "normal"), 1), t))
     return ready
 
@@ -379,6 +455,7 @@ def cmd_next(args):
         assignee = args.assignee or os.environ.get(AGENT_ENV)
         if not assignee:
             die(f"--claim needs --assignee or ${AGENT_ENV}")
+        cfg = load_config(root)
         with Lock(root):
             index = load_index(root)
             ready = _ready_tasks(index)
@@ -386,13 +463,10 @@ def cmd_next(args):
                 print("no ready tasks")
                 sys.exit(1)
             tid = ready[0]
+            err = apply_claim(root, index, tid, assignee, cfg)
+            if err:
+                die(err)
             task = index["tasks"][tid]
-            task["status"] = "in_progress"
-            task["assignee"] = assignee
-            task["updated"] = now()
-            save_index(root, index)
-            set_note_status(root, tid, "in_progress")
-            append_log(root, tid, assignee, "claimed")
     else:
         index = load_index(root)
         ready = _ready_tasks(index)
@@ -416,23 +490,13 @@ def cmd_claim(args):
     assignee = args.assignee or os.environ.get(AGENT_ENV)
     if not assignee:
         die(f"provide --assignee or set ${AGENT_ENV}")
+    cfg = load_config(root)
     with Lock(root):
         index = load_index(root)
         tid = resolve_id(index, args.id)
-        task = index["tasks"][tid]
-        if task["status"] != "open" and not args.force:
-            die(f"{tid} is {task['status']}, not open"
-                + (f" (assignee: {task['assignee']})" if task.get("assignee") else "")
-                + " — use --force to take it anyway")
-        unresolved = unresolved_blockers(index, task)
-        if unresolved and not args.force:
-            die(f"{tid} is blocked by: {', '.join(unresolved)} — use --force to override")
-        task["status"] = "in_progress"
-        task["assignee"] = assignee
-        task["updated"] = now()
-        save_index(root, index)
-        set_note_status(root, tid, "in_progress")
-        append_log(root, tid, assignee, "claimed")
+        err = apply_claim(root, index, tid, assignee, cfg, force=args.force)
+        if err:
+            die(err)
     print(f"claimed {tid} ({assignee})")
 
 
@@ -443,6 +507,8 @@ def _set_status(root, raw_id, new_status, agent, summary=None):
         task = index["tasks"][tid]
         old = task["status"]
         task["status"] = new_status
+        if new_status != "in_progress":
+            task.pop("lease_until", None)
         task["updated"] = now()
         save_index(root, index)
         set_note_status(root, tid, new_status)
@@ -518,6 +584,28 @@ def cmd_log(args):
     print(f"logged to {tid}")
 
 
+def cmd_heartbeat(args):
+    root = find_dir()
+    cfg = load_config(root)
+    assignee = args.assignee or os.environ.get(AGENT_ENV)
+    if not assignee:
+        die(f"provide --assignee or set ${AGENT_ENV}")
+    with Lock(root):
+        index = load_index(root)
+        tid = resolve_id(index, args.id)
+        task = index["tasks"][tid]
+        if task["status"] != "in_progress":
+            die(f"{tid} is {task['status']}, not in_progress — nothing to heartbeat")
+        if task.get("assignee") != assignee and not args.force:
+            die(f"{tid} is assigned to {task.get('assignee')}, not {assignee} — "
+                "your expired claim may have been stolen; stop working on it "
+                "(--force extends the lease anyway)")
+        task["lease_until"] = compute_lease(cfg)
+        task["updated"] = now()
+        save_index(root, index)
+    print(f"{tid} lease extended to {task['lease_until']}")
+
+
 def cmd_note(args):
     root = find_dir()
     index = load_index(root)
@@ -539,12 +627,16 @@ def cmd_board(args):
             "counts": {s: len(ids) for s, ids in by_status.items()},
             "by_status": by_status,
             "blocked": blocked,
+            "expired_lease": [tid for tid in by_status["in_progress"]
+                              if lease_expired(index["tasks"][tid])],
         }, indent=2))
         return
     total = len(index["tasks"])
     print(f"queue: {root}  ({total} task{'s' if total != 1 else ''})")
+    expired = [tid for tid in by_status["in_progress"]
+               if lease_expired(index["tasks"][tid])]
     for status in ("open", "in_progress", "review"):
-        ids = by_status[status]
+        ids = [tid for tid in by_status[status] if tid not in expired]
         if not ids:
             continue
         print(f"{status}:")
@@ -553,6 +645,12 @@ def cmd_board(args):
             assignee = f"({task['assignee']})  " if task.get("assignee") else ""
             marker = f"  [blocked ← {', '.join(blocked[tid])}]" if tid in blocked else ""
             print(f"  {tid}  {assignee}{task['title']}{marker}")
+    if expired:
+        print("expired lease (claimable):")
+        for tid in expired:
+            task = index["tasks"][tid]
+            print(f"  {tid}  (was {task.get('assignee')})  {task['title']}"
+                  f"  lease expired {task['lease_until']}")
     print(f"done: {len(by_status['done'])}, cancelled: {len(by_status['cancelled'])}")
 
 
@@ -640,6 +738,12 @@ def main():
     p.add_argument("message")
     agent_flag(p)
     p.set_defaults(func=cmd_log)
+
+    p = sub.add_parser("heartbeat", help="extend your claim's lease on a task")
+    p.add_argument("id")
+    p.add_argument("--assignee")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_heartbeat)
 
     p = sub.add_parser("note", help="print the path to a task's note file")
     p.add_argument("id")

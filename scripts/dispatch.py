@@ -171,6 +171,10 @@ Do this, in order:
    python3 "{cli}" block {tid} "question for planner: <what you need>" --agent {agent}
    and stop -- an unattended wrong guess costs more than a paused task.
 3. Do the work, staying strictly inside the note's scope.
+   - Your claim is a lease, not a lock. During long steps, extend it:
+     python3 "{cli}" heartbeat {tid} --assignee {agent}
+     (at least once per half lease). If a heartbeat fails because the task is
+     assigned to someone else, your expired claim was stolen: stop immediately.
    - Log milestones as you go: python3 "{cli}" log {tid} "<update>" --agent {agent}
    - Longer findings go in the note's Notes section (edit the file directly;
      keep Work log as the last section).

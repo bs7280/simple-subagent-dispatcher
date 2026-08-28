@@ -36,6 +36,12 @@ Your agent name: use what the dispatch prompt assigned you (e.g.
    `tasks block TASK-042 "question for planner: <what you need>"`, log it, and
    stop. An unattended wrong guess costs more than a paused task.
 3. **Work — inside the scope of the note, nothing else.**
+   - Your claim is a **lease, not a lock** (default 90 min; config
+     `lease_minutes`). During long steps, heartbeat:
+     `tasks heartbeat TASK-042 --assignee <you>` — at least once per half
+     lease. If a heartbeat fails because the task is assigned to someone else,
+     your expired claim was legitimately stolen: **stop working on it
+     immediately** and report.
    - Log milestones as you go: `tasks log TASK-042 "root cause: <x>"` — the
      work log is how the planner watches you without interrupting.
    - Put longer findings/decisions in the note's **Notes** section by editing
