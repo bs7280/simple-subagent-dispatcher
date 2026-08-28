@@ -198,7 +198,13 @@ project's default in **`.agent-tasks/config.json`** (all keys optional):
 - **Permissions** — the default is `acceptEdits`, plus an automatic allowlist
   entry for the queue CLI itself, composed from the configured `runner` in
   both quoting styles so pre-approvals always match the prompts, plus whatever
-  rules you put in `allowed_tools`. In the other direction, dispatched workers
+  rules you put in `allowed_tools`. **Permission rules are matched per tool family**: a
+  `Bash(...)` rule does not cover the `PowerShell` tool, and Windows sessions
+  freely use either shell — headless, an unmatched family is a denial with no
+  prompt. So the queue-CLI pre-approval is composed for **both families**
+  (four rules: Bash + PowerShell × both quoting styles), and every shell rule
+  in `allowed_tools` automatically gains its other-shell twin
+  (`expand_shell_rules: false` opts out). In the other direction, dispatched workers
   get `--disallowedTools` rules `Edit(…/index.json)` and `Edit(…/tasks/**)` —
   only `Edit(path)` rules are matched by file permission checks, and they
   cover *all* file-editing tools, so those two rules are the whole fence.

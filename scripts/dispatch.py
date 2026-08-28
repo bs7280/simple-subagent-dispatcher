@@ -358,6 +358,32 @@ def write_prompt_file(root, name, prompt):
     return path
 
 
+SHELL_FAMILIES = ("Bash", "PowerShell")
+
+
+def expand_shell_rules(rules, cfg):
+    """Permission rules are matched per TOOL FAMILY: a Bash(...) rule does
+    not cover the PowerShell tool, and Windows sessions frequently reach for
+    PowerShell -- headless, an unmatched family means denial ("approval that
+    never arrives"). Add the other shell's twin for every shell rule, so
+    users don't need to know this permission-system quirk. Opt out with
+    config "expand_shell_rules": false."""
+    if not cfg.get("expand_shell_rules", True):
+        return list(rules)
+    out = []
+    for rule in rules:
+        out.append(rule)
+        for fam in SHELL_FAMILIES:
+            if rule.startswith(fam + "("):
+                for twin in SHELL_FAMILIES:
+                    if twin != fam:
+                        twin_rule = twin + rule[len(fam):]
+                        if twin_rule not in rules and twin_rule not in out:
+                            out.append(twin_rule)
+                break
+    return out
+
+
 def claude_cmd(cfg, args, base):
     model = getattr(args, "model", None) or cfg["model"]
     pm = getattr(args, "permission_mode", None) or cfg["permission_mode"]
@@ -378,8 +404,11 @@ def claude_cmd(cfg, args, base):
     # needs) come from config "allowed_tools".
     cli = cli_path()
     run = runner_str(cfg)
-    rules = [f'Bash({run} "{cli}":*)', f"Bash({run} {cli}:*)"]
-    rules += list(cfg["allowed_tools"])
+    # both shell families, both quoting styles: four rules for the queue CLI
+    rules = []
+    for fam in SHELL_FAMILIES:
+        rules += [f'{fam}({run} "{cli}":*)', f"{fam}({run} {cli}:*)"]
+    rules += expand_shell_rules(list(cfg["allowed_tools"]), cfg)
     cmd += ["--allowedTools", " ".join(rules)]
     # Queue state is read-only to dispatched workers: deny file-tool writes
     # on the index and the task notes. Only Edit(path) rules are matched by

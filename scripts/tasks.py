@@ -62,6 +62,8 @@ CONFIG_DEFAULTS = {
     "model": None,              # default: the claude CLI's own default model
     "permission_mode": "acceptEdits",
     "allowed_tools": [],        # extra permission rules, e.g. ["Bash(pnpm test:*)"]
+    "expand_shell_rules": True,  # auto-add the Bash<->PowerShell twin of each
+                                 # shell rule (families are matched separately)
     "bootstrap": ".claude/task-worker-bootstrap.py",  # run via runner in fresh worktrees
     "claude_bin": "claude",     # string or argv list (e.g. ["cmd", "/c", "claude"])
     "prompt_via": "auto",       # "argv" | "stdin" | "auto" (stdin iff the
@@ -417,7 +419,9 @@ Machine-managed task queue shared by planner and worker agents
   `model_tiers` (["haiku","sonnet","opus"] -- ordering behind `--tier`),
   `mutex_stale_minutes` (30 -- named-mutex stale-steal timeout),
   `model` (claude CLI default), `permission_mode` ("acceptEdits"),
-  `allowed_tools` ([] -- extra permission rules for what your workers may run),
+  `allowed_tools` ([] -- extra permission rules for what your workers may run;
+  Bash(...)/PowerShell(...) entries get their other-shell twin added
+  automatically unless `expand_shell_rules` is false),
   `bootstrap` (".claude/task-worker-bootstrap.py" -- a Python script),
   `claude_bin` ("claude" -- string or argv list), `extra_args` ([]).
 - `config.local.json` -- optional machine-local overlay, merged key-by-key

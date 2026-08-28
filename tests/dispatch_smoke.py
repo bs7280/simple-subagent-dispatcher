@@ -157,6 +157,7 @@ def run_all(tmp):
         ("--permission-mode acceptEdits", "permission-mode not passed"),
         ("--model haiku", "config model not passed"),
         ("tasks.py:*)", "queue CLI not allowlisted"),
+        ('PowerShell(' + PY, "queue CLI not allowlisted for the PowerShell family"),
         ("--add-dir", "queue folder not added as a working directory"),
         ("--disallowedTools", "queue-write deny rules not passed"),
         ("FAKE-CLAUDE AGENT_TASKS_DIR: " + queue_root, "AGENT_TASKS_DIR not exported"),
@@ -358,6 +359,30 @@ def run_all(tmp):
     if len(contested) != 1:
         fail(f"double-dispatch spawned {len(contested)} workers")
     disp("wait", tc, check=False)
+
+    # ---- shell-family rule expansion (Bash <-> PowerShell twins) ----
+    set_cfg(allowed_tools=["Bash(pnpm test:*)"])
+    tsf = tasksc("create", "Shell family task").stdout.split()[1]
+    wsf = started_id(disp("start", tsf))
+    time.sleep(1)
+    line = next(l for l in log_text(wsf).splitlines() if "spawn:" in l)
+    if "PowerShell(pnpm test:*)" not in line or "Bash(pnpm test:*)" not in line:
+        fail(f"config Bash rule should gain its PowerShell twin: {line}")
+    if line.count("PowerShell(") < 3:  # 2 CLI quoting styles + the twin
+        fail(f"queue CLI should carry both families: {line}")
+    disp("wait", wsf, check=False)
+
+    set_cfg(allowed_tools=["Bash(pnpm test:*)"], expand_shell_rules=False)
+    tsf2 = tasksc("create", "Shell family opt-out").stdout.split()[1]
+    wsf2 = started_id(disp("start", tsf2))
+    time.sleep(1)
+    line = next(l for l in log_text(wsf2).splitlines() if "spawn:" in l)
+    if "PowerShell(pnpm test:*)" in line:
+        fail("expand_shell_rules: false must suppress the twin for config rules")
+    if "PowerShell(" not in line:
+        fail("the queue CLI itself always gets both families")
+    disp("wait", wsf2, check=False)
+    set_cfg()
 
     # ---- claude_bin ladder: flag > env > local overlay > project config ----
     local_cfg = os.path.join(repo, ".agent-tasks", "config.local.json")
