@@ -287,8 +287,54 @@ def test_resources(tmp):
     q.run("claim", r6, "--assignee", "b")  # r5's lease expired -> gpu free
 
 
+def test_doctor(tmp):
+    q = Queue(tmp)
+    q.run("init")
+    d1 = q.out("create", "Healthy").split()[1]
+    if "doctor: clean" not in q.out("doctor"):
+        fail("fresh queue should be clean")
+
+    # drift: hand-edit a note's frontmatter status
+    d2 = q.out("create", "Drifter").split()[1]
+    note = os.path.join(tmp, ".agent-tasks", "tasks", f"{d2}.md")
+    with open(note) as f:
+        text = f.read()
+    with open(note, "w") as f:
+        f.write(text.replace("status: open", "status: done", 1))
+    res = q.run("doctor", check=False)
+    if res.returncode == 0 or "status drift" not in res.stdout or d2 not in res.stdout:
+        fail(f"doctor should flag drift nonzero: {res.stdout}")
+    res = q.run("doctor", "--fix", check=False)
+    if res.returncode == 0:
+        fail("doctor --fix still exits nonzero when findings were found")
+    with open(note) as f:
+        if "status: open" not in f.read():
+            fail("--fix should rewrite frontmatter from the index")
+
+    # orphan claim: expired lease, no live worker
+    with open(os.path.join(tmp, ".agent-tasks", "config.json"), "w") as f:
+        json.dump({"lease_minutes": 0.02}, f)
+    q.run("claim", d1, "--assignee", "ghost")
+    time.sleep(2.5)
+    res = q.run("doctor", check=False)
+    if "orphan claim" not in res.stdout or "ghost" not in res.stdout:
+        fail(f"doctor should flag orphan claim: {res.stdout}")
+
+    # stray note + missing note
+    with open(os.path.join(tmp, ".agent-tasks", "tasks", "TASK-999.md"), "w") as f:
+        f.write("stray")
+    d3 = q.out("create", "Noteless").split()[1]
+    os.remove(os.path.join(tmp, ".agent-tasks", "tasks", f"{d3}.md"))
+    out = q.run("doctor", check=False).stdout
+    if "TASK-999.md: note file has no index entry" not in out:
+        fail(f"stray note not flagged: {out}")
+    if f"{d3}: index entry has no note file" not in out:
+        fail(f"missing note not flagged: {out}")
+
+
 def main():
-    for test in (test_lifecycle, test_leases, test_tiers, test_resources):
+    for test in (test_lifecycle, test_leases, test_tiers, test_resources,
+                 test_doctor):
         tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
         try:
             test(tmp)

@@ -694,6 +694,79 @@ def cmd_note(args):
     print(note_path(root, resolve_id(index, args.id)))
 
 
+def _note_frontmatter_status(root, tid):
+    """Read the display-only status line from a note. (Nothing else ever
+    reads it back — index.json is authoritative; this exists only so doctor
+    can detect drift.)"""
+    try:
+        with open(note_path(root, tid)) as f:
+            text = f.read()
+    except OSError:
+        return None, False
+    m = re.search(r"^status: (.*)$", text, re.M)
+    return (m.group(1).strip() if m else None), True
+
+
+def cmd_doctor(args):
+    """Integrity report: index vs notes drift, orphan claims, strays."""
+    root = find_dir()
+    index = load_index(root)
+    findings = []
+    fixed = 0
+
+    for tid, task in sorted(index["tasks"].items()):
+        note_status, exists = _note_frontmatter_status(root, tid)
+        if not exists:
+            findings.append(f"{tid}: index entry has no note file ({task['note']})")
+            continue
+        if note_status is not None and note_status != task["status"]:
+            findings.append(f"{tid}: status drift — index '{task['status']}' vs "
+                            f"note frontmatter '{note_status}' (index wins)")
+            if args.fix:
+                with Lock(root):
+                    set_note_status(root, tid, task["status"])
+                fixed += 1
+
+    tasks_dir = os.path.join(root, TASKS_SUBDIR)
+    if os.path.isdir(tasks_dir):
+        for name in sorted(os.listdir(tasks_dir)):
+            if name.endswith(".md") and name[:-3] not in index["tasks"]:
+                findings.append(f"{TASKS_SUBDIR}/{name}: note file has no index entry")
+
+    # orphan claims: in_progress + assignee + expired lease + no live worker
+    live_tasks = set()
+    workers_path = os.path.join(root, "runtime", "workers.json")
+    if os.path.isfile(workers_path):
+        try:
+            with open(workers_path) as f:
+                workers = json.load(f)
+        except ValueError:
+            workers = {}
+        try:
+            import procs  # same directory; optional for a standalone tasks.py
+            for w in workers.values():
+                pid = w.get("pid")
+                if isinstance(pid, int) and pid > 0 and procs.is_alive(pid):
+                    live_tasks.add(w.get("task"))
+        except ImportError:
+            pass
+    for tid, task in sorted(index["tasks"].items()):
+        if (task["status"] == "in_progress" and task.get("assignee")
+                and lease_expired(task) and tid not in live_tasks):
+            findings.append(f"{tid}: orphan claim — assignee {task['assignee']}, "
+                            f"lease expired {task['lease_until']}, no live worker "
+                            f"(claimable; next/claim will steal it)")
+
+    for finding in findings:
+        print(finding)
+    if args.fix and fixed:
+        print(f"fixed {fixed} drifted note(s) from the index")
+    if findings:
+        print(f"doctor: {len(findings)} finding(s)")
+        sys.exit(1)
+    print("doctor: clean")
+
+
 def cmd_board(args):
     root = find_dir()
     index = load_index(root)
@@ -844,6 +917,12 @@ def main():
     p = sub.add_parser("note", help="print the path to a task's note file")
     p.add_argument("id")
     p.set_defaults(func=cmd_note)
+
+    p = sub.add_parser("doctor", help="integrity report: index/note drift, "
+                                      "orphan claims, strays (exit 1 on findings)")
+    p.add_argument("--fix", action="store_true",
+                   help="rewrite drifted note frontmatter from the index")
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("board", help="status overview of the whole queue")
     p.add_argument("--json", action="store_true")

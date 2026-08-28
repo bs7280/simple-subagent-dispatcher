@@ -121,6 +121,9 @@ duplicating work.
 - `tasks board` — one-screen overview (statuses, assignees, blockers).
 - `tasks list --status in_progress` / `tasks show TASK-042` — the note's Work
   log is the worker's live narration; read it before assuming a worker is stuck.
+- `tasks doctor` — periodic integrity check: index/note drift, orphan
+  claims (crashed workers whose leases expired), stray notes. Exit 1 means
+  findings; `--fix` repairs drifted frontmatter.
 - Workers that hit a wall add a blocker and stop, so check
   `tasks list` for `[blocked ← ...]` markers regularly — free-text blockers
   are usually questions addressed to *you*.

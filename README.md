@@ -104,6 +104,7 @@ queue at any time.
 | `log ID MESSAGE` | append a timestamped work-log entry to the note |
 | `note ID` | print the note file's path |
 | `board [--json]` | one-screen status overview |
+| `doctor [--fix]` | integrity report: index/note status drift, orphan claims, stray/missing notes; exit 1 on findings (`--fix` rewrites drifted frontmatter from the index) |
 
 IDs are forgiving: `TASK-012`, `task-012`, and `12` all work. Every mutating
 command takes `--agent` (who's acting, for the work log); set
@@ -210,7 +211,10 @@ when it (or anything else) kills a worker anyway.
 - **`index.json` is the source of truth for metadata** — status, assignee,
   blockers, priority. Only the CLI touches it: writes are serialized through a
   lock file and land via atomic rename, so concurrent workers can't corrupt it
-  and two workers can't claim the same task.
+  and two workers can't claim the same task. The `status:` line in a note's
+  frontmatter is display-only — written on change, never read back; `tasks
+  doctor` reports drift, orphan claims, and stray/missing notes (exit 1 on
+  findings).
 - **The note body belongs to agents.** Description, acceptance criteria, notes,
   findings — edit the markdown directly; that's the point. Keep **Work log**
   as the last section (the CLI appends there).
