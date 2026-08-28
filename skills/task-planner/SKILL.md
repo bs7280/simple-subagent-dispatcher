@@ -70,14 +70,32 @@ Options, by weight:
 - **Subagents (Agent tool)** — cheapest; fine for small independent tasks. One
   subagent per task, all dispatched in parallel *only if* their tasks don't
   share exclusive resources (see above).
-- **Independent headless sessions** — durable and observable; survives this
-  session dying. From the repo root (or a dedicated git worktree per worker
-  for parallel file isolation):
-  `claude -p --permission-mode auto --session-id "$(uuidgen)" "<worker prompt>"`.
-  Record the session id in the task's work log (`tasks log TASK-042 "worker
-  session <id>"`) so a dead worker can be resumed later with
-  `claude -p --resume <id> --permission-mode auto "continue your task"`.
-- **Humans / interactive sessions** — just hand over the task id.
+- **The dispatcher (recommended for unattended workers)** — durable,
+  observable, resumable. `dispatch` = `python3
+  "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.py"`:
+  - `dispatch start TASK-042` — spawns a headless `claude -p` worker with its
+    own session id and a ready-made worker prompt (no need to write one). Runs
+    **in the repo checkout by default**; add `--worktree` for an isolated git
+    worktree per worker. Which is right is the project's call — record the
+    default in `.agent-tasks/config.json` (`worktree`, `model`,
+    `permission_mode`, `allowed_tools` — the commands your workers may run
+    unattended, e.g. `"Bash(pnpm test:*)"` — `bootstrap`, …). The queue CLI is
+    always pre-approved for workers; everything outside the allowlist is
+    denied-not-prompted, so thin allowlists show up as denied actions in the
+    transcript, not hangs.
+  - `dispatch list` — all workers, with `[NEEDS-RESUME]` on any that exited
+    while its task was still in_progress.
+  - `dispatch watch <worker> --follow` — tail the worker's real transcript.
+  - `dispatch wait <worker>` — block until it exits (exit 3 = died mid-task).
+  - `dispatch resume <worker>` — continue a dead worker's session; context and
+    uncommitted edits survive on disk, nothing is lost.
+  - `dispatch stop <worker>` — SIGTERM; the session survives for `resume`.
+  Only run workers **in parallel in-place** if their tasks touch disjoint
+  files; otherwise use `--worktree` or serialize with blockers. Dispatched
+  workers get `AGENT_TASKS_DIR` pointing at the shared queue, so worktree
+  copies of `.agent-tasks/` are never written to.
+- **Humans / interactive sessions** — just hand over the task id (or paste
+  `dispatch prompt TASK-042` output into any session).
 
 Don't pre-claim on a worker's behalf — workers claim for themselves, and
 claims are atomic (`tasks claim` / `tasks next --claim`), so an accidental

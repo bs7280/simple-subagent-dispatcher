@@ -2,8 +2,9 @@
 
 A Claude Code plugin (**`agent-tasks`**) for coordinating a planner agent and
 multiple worker agents through a **file-based task queue** that lives in your
-repo. No server, no database, no framework — a JSON index plus one markdown
-note per task.
+repo, plus a **dispatcher** that spawns, watches, and resumes headless
+`claude -p` workers against it. No server, no database, no framework — a JSON
+index plus one markdown note per task.
 
 ```
 your-repo/
@@ -92,6 +93,84 @@ command takes `--agent` (who's acting, for the work log); set
 `AGENT_TASKS_AGENT` once instead of repeating it. `AGENT_TASKS_DIR` overrides
 the queue location (default: nearest `.agent-tasks/` walking up from cwd).
 
+## Dispatcher
+
+`scripts/dispatch.py` turns tasks into running workers. Each worker is a
+**top-level headless `claude -p` process** with its own minted `--session-id` —
+not an in-process subagent — which buys the two properties subagent fan-out
+lacks:
+
+- **Observable**: Claude Code persists every session's transcript to disk
+  incrementally (`~/.claude/projects/…/<session-id>.jsonl`). `watch` tails the
+  real transcript (located by globbing the session id), parsed into compact
+  events — no duplicated logging.
+- **Resumable**: if a worker dies (usage limit, crash, laptop sleep), nothing
+  is lost. `resume` continues the same session — context and uncommitted
+  working-tree edits intact.
+
+| command | what it does |
+|---|---|
+| `start TASK-042 [--worktree\|--in-place] [--model] [--agent-name] [--force]` | spawn a worker with a ready-made prompt (claim → work → log → finish to `review`) |
+| `list [--json]` | all workers; flags `[NEEDS-RESUME]` on any that exited while its task was still `in_progress` |
+| `watch WORKER [--follow] [--tail N] [--from-start]` | show/tail the worker's transcript as compact events |
+| `wait WORKER [--timeout]` | block until it exits — exit 3 = died mid-task, 2 = timeout |
+| `resume WORKER [--prompt]` | continue a dead worker's session (default continuation prompt re-orients it: re-read task, check `git status`, carry on) |
+| `stop WORKER` | SIGTERM; the session survives for `resume` |
+| `prompt TASK-042` | print the worker prompt without spawning (paste into any session) |
+
+`WORKER` accepts a worker id, a unique prefix, or a task id (→ that task's
+latest worker).
+
+### In-place vs. worktree — the project's call
+
+By default workers run **in the repo checkout**. `--worktree` gives each worker
+an isolated `git worktree` (branch `agent-tasks/<worker-id>`, placed in a
+sibling `<repo>-worktrees/` dir) — necessary when parallel workers touch
+overlapping files, overkill when they don't. Neither is required: set your
+project's default in **`.agent-tasks/config.json`** (all keys optional):
+
+```json
+{
+  "worktree": false,
+  "worktree_root": null,
+  "model": null,
+  "permission_mode": "acceptEdits",
+  "allowed_tools": [],
+  "bootstrap": ".claude/task-worker-bootstrap.sh",
+  "claude_bin": "claude",
+  "extra_args": []
+}
+```
+
+- **Permissions** — the default is `acceptEdits`, plus an automatic allowlist
+  entry for the queue CLI itself (so claim/log/block/finish always work
+  unattended), plus whatever rules you put in `allowed_tools` (e.g.
+  `"Bash(pnpm test:*)"`, `"Bash(git commit:*)"` — the commands *your* workers
+  need). Everything else is **denied, never prompted** — a headless session
+  can't answer a prompt, and a denied action lets the run continue and shows
+  up in the transcript. Tested live: `--permission-mode auto` sounds right for
+  unattended work, but in a repo with no accumulated allowlist it denies even
+  in-project file writes headless — set it in config only for repos whose
+  `.claude/settings` already allow what workers need. `bypassPermissions` is
+  scoped by Anthropic's docs to isolated environments (containers/VMs); don't
+  use it on a bare laptop.
+- **`bootstrap`** — a fresh worktree has no `node_modules` and no gitignored
+  `.env` files. If the repo has this script, the dispatcher runs it (cwd = the
+  new worktree, non-fatal) *before* launching the worker, so the worker doesn't
+  burn turns rediscovering `pnpm install`. Mechanism generic, policy local:
+  each repo writes its own (e.g. hardlink-seed `node_modules` from the main
+  checkout + `pnpm install --frozen-lockfile` + copy `.env` files).
+- Workers get `AGENT_TASKS_DIR` pointing at the **shared** queue, so in
+  worktree mode the worktree's own checked-out copy of `.agent-tasks/` is never
+  written to.
+
+### The worker prompt bans the known death mode
+
+A headless worker that launches a long command in the background and ends its
+turn "waiting" **dies** — `-p` sessions are never re-invoked when background
+work finishes. The dispatch prompt bans this outright, and `resume` exists for
+when it (or anything else) kills a worker anyway.
+
 ## How coordination works
 
 - **`index.json` is the source of truth for metadata** — status, assignee,
@@ -110,10 +189,12 @@ the queue location (default: nearest `.agent-tasks/` walking up from cwd).
 - **Scope discipline**: a worker that finds adjacent work *creates a new task*
   instead of expanding its own — the queue is the escalation channel.
 
-**Commit `.agent-tasks/` or gitignore it?** Your call. Committing makes task
-state travel with the repo (and gives you history for free); ignoring avoids
-index merge conflicts when workers run on different branches. For parallel
-workers in git worktrees, prefer one shared queue via `AGENT_TASKS_DIR`.
+**The folder belongs in the repo.** Commit `.agent-tasks/` by default — task
+state travels with the project and you get history for free. Machine-local
+dispatcher state (`runtime/`: worker registry, pids, spawn logs) self-gitignores
+so it never ends up committed. Projects that prefer to keep the queue out of
+version control (e.g. heavy multi-branch work where the index would conflict)
+can gitignore the folder instead — that's a per-project call.
 
 ## What's in the plugin
 
@@ -127,12 +208,13 @@ workers in git worktrees, prefer one shared queue via `AGENT_TASKS_DIR`.
   and ending the turn "waiting" (headless sessions are never re-invoked).
 - **`/agent-tasks:board`** — summarize the queue: what's in review, what's
   blocked on what, who's working on what.
+- **`scripts/dispatch.py`** — the dispatcher (see above): headless workers as
+  durable, watchable, resumable `claude -p` sessions.
 
 ## Roadmap
 
-- Dispatcher command: spawn/resume/watch headless `claude -p` workers in git
-  worktrees (one durable session per task, transcripts on disk).
-- `wait`/`watch` primitives so planners don't hand-roll poll loops.
+- Dedicated verification workers (`VERIFY-` tasks draining an untested-gaps
+  queue; they serialize naturally on the browser slot).
 - MCP wrapper once the CLI surface stabilizes through use.
 
 ## License
