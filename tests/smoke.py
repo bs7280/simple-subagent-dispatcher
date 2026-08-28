@@ -237,8 +237,58 @@ def test_tiers(tmp):
         fail("bogus tier name should be rejected")
 
 
+def test_resources(tmp):
+    q = Queue(tmp)
+    q.run("init")
+    with open(os.path.join(tmp, ".agent-tasks", "config.json"), "w") as f:
+        json.dump({"lease_minutes": 0.02}, f)  # 1.2s leases for the expiry case
+
+    r1 = q.out("create", "Migration A", "--resources", "db").split()[1]
+    r2 = q.out("create", "Migration B", "--resources", "db,browser").split()[1]
+    r3 = q.out("create", "E2E run", "--resources", "browser").split()[1]
+    r4 = q.out("create", "Plain task").split()[1]
+
+    q.run("claim", r1, "--assignee", "a")
+    res = q.run("claim", r2, "--assignee", "b", check=False)
+    if res.returncode == 0:
+        fail("shared resource tag must refuse second live claim")
+    if f"'db' is held by {r1}" not in res.stderr or "(a," not in res.stderr:
+        fail(f"refusal should name the holder: {res.stderr}")
+
+    # next skips the conflicted task, takes the free ones
+    if q.out("next").split()[0] != r3:
+        fail("next should skip the db-conflicted task")
+    q.run("claim", r3, "--assignee", "c")
+    if q.out("next").split()[0] != r4:
+        fail("next should now skip both held tags")
+
+    board = q.out("board")
+    if "resources held:" not in board or f"db ← {r1}" not in board:
+        fail(f"board should show held resources:\n{board}")
+    if q.js("board", "--json")["resources_held"] != {"db": r1, "browser": r3}:
+        fail("board json resources_held")
+
+    # releasing one tag isn't enough; releasing both frees the task
+    q.run("status", r1, "review", "--agent", "a")
+    res = q.run("claim", r2, "--assignee", "b", check=False)
+    if res.returncode == 0 or f"'browser' is held by {r3}" not in res.stderr:
+        fail("second held tag should still refuse")
+    q.run("status", r3, "review", "--agent", "c")
+    q.run("claim", r2, "--assignee", "b")
+
+    # an expired lease releases its resources
+    r5 = q.out("create", "GPU one", "--resources", "gpu").split()[1]
+    r6 = q.out("create", "GPU two", "--resources", "gpu").split()[1]
+    q.run("status", r2, "review", "--agent", "b")
+    q.run("claim", r5, "--assignee", "a")
+    if q.run("claim", r6, "--assignee", "b", check=False).returncode == 0:
+        fail("live gpu hold should refuse")
+    time.sleep(2.5)
+    q.run("claim", r6, "--assignee", "b")  # r5's lease expired -> gpu free
+
+
 def main():
-    for test in (test_lifecycle, test_leases, test_tiers):
+    for test in (test_lifecycle, test_leases, test_tiers, test_resources):
         tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
         try:
             test(tmp)

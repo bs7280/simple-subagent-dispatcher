@@ -91,7 +91,7 @@ queue at any time.
 | command | what it does |
 |---|---|
 | `init` | create `.agent-tasks/` in the current directory |
-| `create TITLE [--body --criteria --priority --tags --blocked-by --model]` | create a task + note (`--model` pins the model it needs) |
+| `create TITLE [--body --criteria --priority --tags --blocked-by --model --resources]` | create a task + note (`--model` pins the model it needs; `--resources` declares exclusive-resource tags) |
 | `list [--status s1,s2] [--assignee] [--all] [--json]` | list tasks (hides done/cancelled by default) |
 | `show ID [--json]` | metadata + full note |
 | `next [--claim --assignee NAME] [--tier MODEL] [--json]` | best ready task (open/expired-lease, unblocked, priority-ordered); `--tier` only draws tasks at/below that `model_tiers` entry; exit 1 if none |
@@ -213,6 +213,10 @@ when it (or anything else) kills a worker anyway.
   task becomes claimable again — `next`/`claim` steal it and record the steal
   (old assignee, expiry time) in the work log. `board` shows expired-lease
   tasks in their own bucket. No human unsticking required.
+- **Resources are mutexes, blockers are ordering.** `--resources db,browser`
+  tags a task's exclusive needs; the queue never lets two live claims hold the
+  same tag (`next` skips conflicted tasks, `claim` refuses naming the holder),
+  and an expired lease releases its holds. `board` shows who holds what.
 - **Workers finish to `review`, never `done`.** Closing is the reviewer's
   (planner's or human's) call, after actually running the acceptance checks.
 - **Scope discipline**: a worker that finds adjacent work *creates a new task*

@@ -34,7 +34,9 @@ Your agent name: use what the dispatch prompt assigned you (e.g.
      below your tier (or unpinned ones).
    - A failed claim means another worker got there first — that is the system
      working. Do not `--force`; report and stop (or `next --claim` if you were
-     told to pick).
+     told to pick). A claim refused because a **resource is held** names the
+     holder: that's mutual exclusion doing its job — take different work,
+     don't wait busily and never force.
 2. **Read.** `tasks show TASK-042` — read the whole note. If the description
    or acceptance criteria are too thin to act on, do **not** guess:
    `tasks block TASK-042 "question for planner: <what you need>"`, log it, and

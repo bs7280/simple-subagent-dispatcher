@@ -208,6 +208,18 @@ def unresolved_blockers(index, task):
     return out
 
 
+def held_resources(index, exclude=None):
+    """Resource tags currently held: each in_progress task with a live
+    (non-expired) lease holds all of its tags."""
+    held = {}
+    for tid, t in index["tasks"].items():
+        if tid == exclude or t["status"] != "in_progress" or lease_expired(t):
+            continue
+        for tag in t.get("resources", []):
+            held.setdefault(tag, tid)
+    return held
+
+
 def tier_allows(cfg, tier, task_model, tid=None):
     """May a --tier worker take a task with this model? Unset model: yes.
     Unknown model names are allowed on tasks but excluded from tier selection
@@ -249,6 +261,14 @@ def apply_claim(root, index, tid, assignee, cfg, force=False):
     unresolved = unresolved_blockers(index, task)
     if unresolved and not force:
         return f"{tid} is blocked by: {', '.join(unresolved)} — use --force to override"
+    held = held_resources(index, exclude=tid)
+    conflicts = [tag for tag in task.get("resources", []) if tag in held]
+    if conflicts and not force:
+        tag = conflicts[0]
+        holder = index["tasks"][held[tag]]
+        return (f"resource '{tag}' is held by {held[tag]} "
+                f"({holder.get('assignee')}, in_progress, lease until "
+                f"{holder.get('lease_until')}) — wait for it or --force")
     task["status"] = "in_progress"
     task["assignee"] = assignee
     task["claimed_at"] = now()
@@ -334,6 +354,8 @@ def fmt_row(tid, task, unresolved):
         line += f"  [blocked ← {', '.join(unresolved)}]"
     if task.get("model"):
         line += f"  [model {task['model']}]"
+    if task.get("resources"):
+        line += f"  [resources: {', '.join(task['resources'])}]"
     if lease_expired(task):
         line += "  [lease expired]"
     return line
@@ -417,6 +439,9 @@ def cmd_create(args):
         }
         if args.model:
             entry["model"] = args.model
+        resources = [r.strip() for r in (args.resources or "").split(",") if r.strip()]
+        if resources:
+            entry["resources"] = resources
         index["tasks"][tid] = entry
         save_index(root, index)
         write_note(root, tid, args.title, args.body, args.criteria, ts)
@@ -485,9 +510,11 @@ def _ready_tasks(index):
     """Claimable tasks (open, or in_progress with an expired lease) with no
     unresolved blockers, best-first."""
     prio = {p: i for i, p in enumerate(PRIORITIES)}
+    held = held_resources(index)
     ready = [tid for tid, t in index["tasks"].items()
              if (t["status"] == "open" or lease_expired(t))
-             and not unresolved_blockers(index, t)]
+             and not unresolved_blockers(index, t)
+             and not any(tag in held for tag in t.get("resources", []))]
     ready.sort(key=lambda t: (prio.get(index["tasks"][t].get("priority", "normal"), 1), t))
     return ready
 
@@ -684,6 +711,7 @@ def cmd_board(args):
             "blocked": blocked,
             "expired_lease": [tid for tid in by_status["in_progress"]
                               if lease_expired(index["tasks"][tid])],
+            "resources_held": held_resources(index),
         }, indent=2))
         return
     total = len(index["tasks"])
@@ -706,6 +734,12 @@ def cmd_board(args):
             task = index["tasks"][tid]
             print(f"  {tid}  (was {task.get('assignee')})  {task['title']}"
                   f"  lease expired {task['lease_until']}")
+    held = held_resources(index)
+    if held:
+        print("resources held:")
+        for tag in sorted(held):
+            holder = index["tasks"][held[tag]]
+            print(f"  {tag} ← {held[tag]} ({holder.get('assignee')})")
     print(f"done: {len(by_status['done'])}, cancelled: {len(by_status['cancelled'])}")
 
 
@@ -732,6 +766,8 @@ def main():
     p.add_argument("--tags", help="comma-separated tags")
     p.add_argument("--blocked-by", help="comma-separated blockers (task ids or free text)")
     p.add_argument("--model", help="pin the model this task needs (e.g. opus)")
+    p.add_argument("--resources", help="comma-separated exclusive-resource tags "
+                                       "(e.g. db-migrations,browser)")
     agent_flag(p)
     p.set_defaults(func=cmd_create)
 

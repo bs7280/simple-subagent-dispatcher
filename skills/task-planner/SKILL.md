@@ -59,10 +59,14 @@ Rules for a good task note:
   `tasks block TASK-005 TASK-001`). A blocker naming a task id auto-resolves
   when that task is done/cancelled; free-text blockers (e.g. "waiting on API
   key from Ben") stay until `tasks unblock` removes them.
-- **Serialize exclusive resources with blockers.** Two tasks that both touch DB
-  migrations, reset a shared dev database, or drive the same browser must not
-  run concurrently — chain them (`--blocked-by`) rather than hoping. E2E-suite
-  tasks should run solo and last.
+- **Declare exclusive resources.** Two tasks that both touch DB migrations,
+  reset a shared dev database, or drive the same browser must not run
+  concurrently: give them the same `--resources` tag (e.g.
+  `--resources db-migrations` or `browser`). The queue refuses to let two
+  live claims hold the same tag, and the refusal names the holder — mutual
+  exclusion without imposing an order. Use blockers when order matters,
+  resources when only exclusivity does. E2E-suite tasks should still run solo
+  and last.
 
 ## 3. Dispatch workers
 
