@@ -56,6 +56,12 @@ Rules for a good task note:
   The dispatcher uses the task's model automatically (task > config > CLI
   default), and tier-limited workers (`next --tier`) respect it: a haiku-tier
   worker never picks up an opus-pinned task.
+- **Bridging an existing tracker?** Use the wrapper-task pattern: the task
+  body says "execute task <X> from this repo's own tracker via its own
+  protocol; outbox + sentinel are your only duties to this queue", and the
+  acceptance criteria reference the *other* system's receipts (its done
+  status, its verification note) — review checks the real system, not the
+  wrapper's word.
 - **Sequence with blockers.** `--blocked-by TASK-001` (or later
   `tasks block TASK-005 TASK-001`). A blocker naming a task id auto-resolves
   when that task is done/cancelled; free-text blockers (e.g. "waiting on API

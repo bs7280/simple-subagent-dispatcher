@@ -329,6 +329,33 @@ can gitignore the folder instead — that's a per-project call.
 - **`scripts/dispatch.py`** — the dispatcher (see above): headless workers as
   durable, watchable, resumable `claude -p` sessions.
 
+## The wrapper-task pattern (meeting an existing tracker)
+
+Most real projects already have a tracker — their own queue, a board, a
+worklist protocol. Don't migrate it; **bridge it**. Create an `.agent-tasks`
+task whose body says:
+
+> Execute task `<X>` from this repo's own tracker (say where it lives), using
+> the repo's own worker skill/protocol. Your only duties toward *this* queue
+> are your outbox and the final `STATUS:` sentinel.
+
+Three rules make it work:
+
+- **The wrapper's acceptance criteria reference the other system's
+  receipts** — "the repo tracker shows `<X>` done, with its verification
+  note" — so reviewing the wrapper means checking the real system, never
+  trusting the wrapper's own word.
+- The repo's own queue keeps doing the real coordination; `.agent-tasks`
+  contributes what it's good at: dispatch, leases + auto-heartbeat, outbox
+  folding, and the review gate.
+- Blockers translate cleanly: a worker that hits a wall in the inner system
+  writes `STATUS: blocked: <precise reason>`, and the fold reopens the
+  wrapper with that reason attached — the planner sees the inner system's
+  problem without reading its tracker.
+
+Field-validated: concurrent workers driving an existing repo's worklist
+through wrapper tasks, including the blocked path end-to-end in production.
+
 ## Roadmap
 
 This repo dogfoods itself: the backlog lives in [`.agent-tasks/`](.agent-tasks/)
