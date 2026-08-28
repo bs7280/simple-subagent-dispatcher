@@ -81,8 +81,8 @@ def run_all(tmp):
         fail("default runner missing from composed prompt")
     if "NEVER launch a long-running command" not in out:
         fail("prompt missing death-mode ban")
-    if f"claim {t1}" not in out:
-        fail("prompt missing claim step")
+    if "already claimed for you" not in out or f"show {t1}" not in out:
+        fail("prompt should teach verify-preclaim, not self-claim")
 
     # stub claude; runner pinned to this interpreter so the test needs no uv
     stub = os.path.join(tmp, "fake_claude.py")
@@ -93,6 +93,9 @@ def run_all(tmp):
 
     # ---- start in-place (default) ----
     wid = started_id(disp("start", t1))
+    t = json.loads(tasksc("show", t1, "--json").stdout)
+    if t["status"] != "in_progress" or t["assignee"] != wid:
+        fail(f"start should pre-claim for the minted worker: {t}")
     if "running" not in list_row(wid):
         fail("worker not listed running")
     with open(os.path.join(repo, ".agent-tasks", "tasks", f"{t1}.md")) as f:
@@ -115,8 +118,7 @@ def run_all(tmp):
         if needle not in log:
             fail(f"{msg}\n--- log:\n{log}")
 
-    # ---- worker dies mid-task -> NEEDS-RESUME -> resume -> stop ----
-    tasksc("claim", t1, "--assignee", wid)
+    # ---- worker dies mid-task (task stays pre-claimed) -> NEEDS-RESUME ----
     res = disp("wait", wid, check=False)
     if res.returncode != 3:
         fail(f"wait should exit 3 for died-mid-task, got {res.returncode}")
@@ -177,8 +179,26 @@ def run_all(tmp):
     if "FAKE-CLAUDE AGENT_TASKS_DIR: " + queue_root not in log2:
         fail("worktree worker not pointed at shared queue")
     res = disp("wait", w2, "--timeout", "15", check=False)
-    if res.returncode != 0:
-        fail(f"worktree worker wait rc={res.returncode}")
+    if res.returncode != 3:  # stub never finishes the task, so it stays claimed
+        fail(f"worktree worker wait rc={res.returncode}, want 3")
+
+    # ---- double-dispatch: exactly one spawns; loser exits before spawning ----
+    tc = tasksc("create", "Contested task").stdout.split()[1]
+    racers = [subprocess.Popen([PY, DISPATCH, "run", tc], cwd=repo, env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True) for _ in range(2)]
+    outs = [r.communicate() for r in racers]
+    winners = [i for i, r in enumerate(racers) if r.returncode == 0]
+    if len(winners) != 1:
+        fail(f"double-dispatch: want exactly 1 winner, got {len(winners)}\n{outs}")
+    loser_err = outs[1 - winners[0]][1]
+    if "in_progress" not in loser_err:
+        fail(f"loser should die on the pre-claim, explaining why: {loser_err}")
+    contested = [x for x in json.loads(disp("list", "--json").stdout)
+                 if x["task"] == tc]
+    if len(contested) != 1:
+        fail(f"double-dispatch spawned {len(contested)} workers")
+    disp("wait", tc, check=False)
 
     # ---- start refuses blocked tasks without --force ----
     t3 = tasksc("create", "Blocked", "--blocked-by", t2).stdout.split()[1]

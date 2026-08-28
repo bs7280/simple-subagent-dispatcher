@@ -127,7 +127,7 @@ lacks:
 
 | command | what it does |
 |---|---|
-| `start TASK-042 [--worktree\|--in-place] [--model] [--agent-name] [--force]` | spawn a worker with a ready-made prompt (claim → work → log → finish to `review`) |
+| `start TASK-042 [--worktree\|--in-place] [--model] [--agent-name] [--force]` (alias: `run`) | **pre-claims the task atomically, then** spawns a worker with a ready-made prompt (verify assignment → work → log → heartbeat → finish to `review`) |
 | `list [--json]` | all workers; flags `[NEEDS-RESUME]` on any that exited while its task was still `in_progress` |
 | `watch WORKER [--follow] [--tail N] [--from-start]` | show/tail the worker's transcript as compact events |
 | `wait WORKER [--timeout]` | block until it exits — exit 3 = died mid-task, 2 = timeout |
@@ -186,6 +186,17 @@ project's default in **`.agent-tasks/config.json`** (all keys optional):
 - Workers get `AGENT_TASKS_DIR` pointing at the **shared** queue, so in
   worktree mode the worktree's own checked-out copy of `.agent-tasks/` is never
   written to.
+
+### Dispatch pre-claims; workers verify
+
+`start` claims the task (assignee = the worker id it mints) **before** spawning
+— atomically, under the queue lock. Of two concurrent dispatches of the same
+task, the loser exits immediately with the holder named, instead of burning a
+whole session to discover its claim fails. The worker prompt tells the worker
+the task is pre-claimed: it verifies the assignment, heartbeats during long
+steps, and never claims. If worktree setup or the spawn itself fails, the
+pre-claim is reverted to `open`. Worker-side self-claim still works for
+humans and external agents using the task-worker skill.
 
 ### The worker prompt bans the known death mode
 

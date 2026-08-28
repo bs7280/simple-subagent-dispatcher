@@ -27,6 +27,9 @@ Your agent name: use what the dispatch prompt assigned you (e.g.
 ## The loop
 
 1. **Claim.**
+   - **Dispatched?** If your prompt says the task was *pre-claimed* for you,
+     don't claim: `tasks show TASK-042`, verify the assignee is you (if not,
+     stop — someone else owns it now), and proceed; heartbeat instead.
    - Given a specific id: `tasks claim TASK-042 --assignee <you>`.
    - Told to pick one: `tasks next --claim --assignee <you>`
      (exit code 1 = nothing ready; report that and stop). If you were given a

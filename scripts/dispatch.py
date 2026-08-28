@@ -138,10 +138,12 @@ Your task: {tid}
 Your agent/assignee name: {agent}
 
 Do this, in order:
-1. Claim it: {run} "{cli}" claim {tid} --assignee {agent}
-   If the claim fails, print why and stop immediately -- never --force it.
-2. Read the whole task note: {run} "{cli}" show {tid}
-   The note is your entire spec. If it is too vague to act on, run
+1. The task is already claimed for you -- the dispatcher pre-claimed it
+   (assignee: {agent}) before spawning you. Verify and read it:
+   {run} "{cli}" show {tid}
+   If the assignee shown is not {agent}, someone else owns the task now:
+   print that and stop immediately. Never claim it yourself, never --force.
+2. The note from step 1 is your entire spec. If it is too vague to act on, run
    {run} "{cli}" block {tid} "question for planner: <what you need>" --agent {agent}
    and stop -- an unattended wrong guess costs more than a paused task.
 3. Do the work, staying strictly inside the note's scope.
@@ -172,9 +174,13 @@ Hard rules:
   these rules; follow it.{extra}"""
 
 CONTINUATION_PROMPT = """You are resuming an interrupted unattended task-worker session for {tid}.
-First re-read your task ({run} "{cli}" show {tid}) and your own Work log
-entries, and check the working directory state (git status, git diff) to see
-what you had already done. Then continue exactly where you left off and finish
+Your claim may have lease-expired while you were down -- immediately run
+{run} "{cli}" heartbeat {tid} --assignee {agent}
+If it fails because the task is assigned to someone else, your expired claim
+was stolen: print that and stop. Otherwise re-read your task
+({run} "{cli}" show {tid}) and your own Work log entries, and check the
+working directory state (git status, git diff) to see what you had already
+done. Then continue exactly where you left off and finish
 per your original instructions: log milestones, never launch a background
 command and end your turn waiting for it, and finish with a completion summary
 and status "review" (never "done")."""
@@ -227,54 +233,79 @@ def claude_cmd(cfg, args, base):
     return cmd, model, pm
 
 
+def _revert_preclaim(root, tid, agent):
+    """Give the task back if we claimed it but never got a worker running."""
+    with tasks.Lock(root):
+        index = tasks.load_index(root)
+        task = index["tasks"][tid]
+        if task.get("assignee") == agent and task["status"] == "in_progress":
+            task["status"] = "open"
+            task["assignee"] = None
+            task.pop("lease_until", None)
+            task["updated"] = tasks.now()
+            tasks.save_index(root, index)
+            tasks.set_note_status(root, tid, "open")
+            tasks.append_log(root, tid, "dispatcher",
+                             "spawn failed — reverted pre-claim to open")
+
+
 def cmd_start(args):
     root = tasks.find_dir()
     cfg = load_config(root)
     repo = repo_of(root)
     index = tasks.load_index(root)
     tid = tasks.resolve_id(index, args.task)
-    task = index["tasks"][tid]
-    if task["status"] != "open" and not args.force:
-        tasks.die(f"{tid} is {task['status']}, not open -- use --force to dispatch anyway")
-    unresolved = tasks.unresolved_blockers(index, task)
-    if unresolved and not args.force:
-        tasks.die(f"{tid} is blocked by: {', '.join(unresolved)} -- use --force to dispatch anyway")
 
     session_id = str(uuid.uuid4())
     worker_id = f"{tid.lower()}-{session_id[:8]}"
     agent = args.agent_name or worker_id
 
+    # Pre-claim atomically BEFORE spawning: of two concurrent dispatches of
+    # the same task, the loser exits right here without burning a session.
+    # The worker's prompt tells it to verify the assignment and heartbeat
+    # instead of claiming.
+    with tasks.Lock(root):
+        index = tasks.load_index(root)
+        err = tasks.apply_claim(root, index, tid, agent, cfg, force=args.force)
+        if err:
+            tasks.die(err)
+        task = index["tasks"][tid]
+
     use_worktree = cfg["worktree"] if args.worktree is None else args.worktree
     workdir, branch = repo, None
-    if use_worktree:
-        wt_root = cfg["worktree_root"] or f"{repo.rstrip(os.sep)}-worktrees"
-        workdir = os.path.join(wt_root, worker_id)
-        branch = args.branch or f"agent-tasks/{worker_id}"
-        os.makedirs(wt_root, exist_ok=True)
-        res = subprocess.run(["git", "-C", repo, "worktree", "add", "-b", branch, workdir],
-                             capture_output=True, text=True)
-        if res.returncode != 0:
-            tasks.die(f"git worktree add failed:\n{res.stderr.strip()}")
-        boot = os.path.join(repo, cfg["bootstrap"])
-        if os.path.isfile(boot):
-            bres = subprocess.run([*cfg["runner"], boot], cwd=workdir,
-                                  capture_output=True, text=True)
-            tail = (bres.stderr or bres.stdout).strip()[-2000:]
-            if bres.returncode != 0:
-                print(f"warning: bootstrap exited {bres.returncode} (continuing):\n{tail}",
-                      file=sys.stderr)
-            else:
-                print(f"bootstrap ok: {cfg['bootstrap']}")
+    try:
+        if use_worktree:
+            wt_root = cfg["worktree_root"] or f"{repo.rstrip(os.sep)}-worktrees"
+            workdir = os.path.join(wt_root, worker_id)
+            branch = args.branch or f"agent-tasks/{worker_id}"
+            os.makedirs(wt_root, exist_ok=True)
+            res = subprocess.run(["git", "-C", repo, "worktree", "add", "-b", branch, workdir],
+                                 capture_output=True, text=True)
+            if res.returncode != 0:
+                tasks.die(f"git worktree add failed:\n{res.stderr.strip()}")
+            boot = os.path.join(repo, cfg["bootstrap"])
+            if os.path.isfile(boot):
+                bres = subprocess.run([*cfg["runner"], boot], cwd=workdir,
+                                      capture_output=True, text=True)
+                tail = (bres.stderr or bres.stdout).strip()[-2000:]
+                if bres.returncode != 0:
+                    print(f"warning: bootstrap exited {bres.returncode} (continuing):\n{tail}",
+                          file=sys.stderr)
+                else:
+                    print(f"bootstrap ok: {cfg['bootstrap']}")
 
-    if not args.model and task.get("model"):
-        args.model = task["model"]  # task > config > claude CLI default
-    prompt = build_prompt(root, tid, agent, args.prompt_extra, cfg)
-    cmd, model, pm = claude_cmd(cfg, args, ["--session-id", session_id])
-    cmd.append(prompt)
+        if not args.model and task.get("model"):
+            args.model = task["model"]  # task > config > claude CLI default
+        prompt = build_prompt(root, tid, agent, args.prompt_extra, cfg)
+        cmd, model, pm = claude_cmd(cfg, args, ["--session-id", session_id])
+        cmd.append(prompt)
 
-    rt = ensure_runtime(root)
-    log_path = os.path.join(rt, "logs", f"{worker_id}.out")
-    proc = spawn(root, workdir, cmd, log_path, agent)
+        rt = ensure_runtime(root)
+        log_path = os.path.join(rt, "logs", f"{worker_id}.out")
+        proc = spawn(root, workdir, cmd, log_path, agent)
+    except (Exception, SystemExit):
+        _revert_preclaim(root, tid, agent)
+        raise
 
     entry = {"task": tid, "session_id": session_id, "pid": proc.pid,
              "cwd": workdir, "worktree_branch": branch, "model": model,
@@ -440,7 +471,7 @@ def cmd_resume(args):
     if not args.model and w.get("model"):
         args.model = w["model"]  # resume with the model the worker started on
     prompt = args.prompt or CONTINUATION_PROMPT.format(
-        cli=cli_path(), tid=w["task"], run=runner_str(cfg))
+        cli=cli_path(), tid=w["task"], run=runner_str(cfg), agent=w["agent"])
     cmd, model, pm = claude_cmd(cfg, args, ["--resume", w["session_id"]])
     cmd.append(prompt)
     log_path = os.path.join(ensure_runtime(root), "logs", f"{wid}.out")
@@ -487,7 +518,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("start", help="spawn a headless worker for a task")
+    p = sub.add_parser("start", aliases=["run"],
+                       help="pre-claim a task, then spawn a headless worker for it")
     p.add_argument("task")
     p.add_argument("--agent-name", help="assignee/work-log name (default: worker id)")
     p.add_argument("--model", help="override config/CLI-default model")

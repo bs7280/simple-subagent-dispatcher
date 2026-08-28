@@ -84,8 +84,10 @@ Options, by weight:
 - **The dispatcher (recommended for unattended workers)** — durable,
   observable, resumable. `dispatch` = `python3
   "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.py"`:
-  - `dispatch start TASK-042` — spawns a headless `claude -p` worker with its
-    own session id and a ready-made worker prompt (no need to write one). Runs
+  - `dispatch start TASK-042` — atomically **pre-claims** the task (loser of
+    a double-dispatch exits before spawning a session), then spawns a headless
+    `claude -p` worker with its own session id and a ready-made worker prompt
+    (no need to write one). Runs
     **in the repo checkout by default**; add `--worktree` for an isolated git
     worktree per worker. Which is right is the project's call — record the
     default in `.agent-tasks/config.json` (`worktree`, `model`,
@@ -105,8 +107,9 @@ Options, by weight:
   files; otherwise use `--worktree` or serialize with blockers. Dispatched
   workers get `AGENT_TASKS_DIR` pointing at the shared queue, so worktree
   copies of `.agent-tasks/` are never written to.
-- **Humans / interactive sessions** — just hand over the task id (or paste
-  `dispatch prompt TASK-042` output into any session).
+- **Humans / interactive sessions** — just hand over the task id (the
+  task-worker skill self-claims). `dispatch prompt TASK-042` output assumes a
+  pre-claimed task, so only paste it after claiming for that agent name.
 
 Don't pre-claim on a worker's behalf — workers claim for themselves, and
 claims are atomic (`tasks claim` / `tasks next --claim`), so an accidental
