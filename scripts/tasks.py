@@ -53,7 +53,7 @@ CONFIG_DEFAULTS = {
                                         # command is composed (prompts, skills,
                                         # allowlists, bootstrap)
     "lease_minutes": 90,  # claim lease length; an expired lease is stealable
-    "model_tiers": ["haiku", "sonnet", "opus"],  # ordered cheap → capable,
+    "model_tiers": ["haiku", "sonnet", "opus"],  # ordered cheap -> capable,
                                                  # for next/claim --tier
     "mutex_stale_minutes": 30,  # named mutex (lock/unlock) stale-steal timeout
     # -- dispatcher --
@@ -73,7 +73,7 @@ def load_config(root):
     path = os.path.join(root, "config.json")
     if os.path.isfile(path):
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 user = json.load(f)
         except ValueError as e:
             die(f"bad {path}: {e}")
@@ -166,13 +166,13 @@ class Lock:
 
 
 def load_index(root):
-    with open(os.path.join(root, INDEX)) as f:
+    with open(os.path.join(root, INDEX), encoding="utf-8") as f:
         return json.load(f)
 
 
 def save_index(root, index):
     fd, tmp = tempfile.mkstemp(dir=root, prefix=".index-", suffix=".tmp")
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(index, f, indent=2)
         f.write("\n")
     os.replace(tmp, os.path.join(root, INDEX))
@@ -271,10 +271,10 @@ def apply_claim(root, index, tid, assignee, cfg, force=False):
             if task.get("lease_until"):
                 msg += f", lease until {task['lease_until']}"
             msg += ")"
-        return msg + " — use --force to take it anyway"
+        return msg + " -- use --force to take it anyway"
     unresolved = unresolved_blockers(index, task)
     if unresolved and not force:
-        return f"{tid} is blocked by: {', '.join(unresolved)} — use --force to override"
+        return f"{tid} is blocked by: {', '.join(unresolved)} -- use --force to override"
     held = held_resources(index, exclude=tid)
     conflicts = [tag for tag in task.get("resources", []) if tag in held]
     if conflicts and not force:
@@ -282,7 +282,7 @@ def apply_claim(root, index, tid, assignee, cfg, force=False):
         holder = index["tasks"][held[tag]]
         return (f"resource '{tag}' is held by {held[tag]} "
                 f"({holder.get('assignee')}, in_progress, lease until "
-                f"{holder.get('lease_until')}) — wait for it or --force")
+                f"{holder.get('lease_until')}) -- wait for it or --force")
     task["status"] = "in_progress"
     task["assignee"] = assignee
     task["claimed_at"] = now()
@@ -310,7 +310,7 @@ status: open
 created: {ts}
 ---
 
-# {tid} — {title}
+# {tid} -- {title}
 
 ## Description
 
@@ -322,7 +322,7 @@ created: {ts}
 
 ## Notes
 
-_(worker scratch space — findings, decisions, open questions)_
+_(worker scratch space -- findings, decisions, open questions)_
 
 ## Work log
 
@@ -332,23 +332,23 @@ _(worker scratch space — findings, decisions, open questions)_
 def write_note(root, tid, title, body, criteria, ts):
     text = NOTE_TEMPLATE.format(
         tid=tid, title=title, ts=ts,
-        body=body or "_(no description yet — planner should fill this in)_",
+        body=body or "_(no description yet -- planner should fill this in)_",
         criteria=criteria or "_(none specified)_",
     )
-    with open(note_path(root, tid), "w") as f:
+    with open(note_path(root, tid), "w", encoding="utf-8") as f:
         f.write(text)
 
 
 def set_note_status(root, tid, status):
     path = note_path(root, tid)
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             text = f.read()
     except OSError:
         return
     new, n = re.subn(r"^status: .*$", f"status: {status}", text, count=1, flags=re.M)
     if n:
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(new)
 
 
@@ -357,7 +357,7 @@ def append_log(root, tid, agent, msg):
     Serialized under the queue lock (reentrant if the caller holds it), so
     concurrent appends can't interleave."""
     with Lock(root):
-        with open(note_path(root, tid), "a") as f:
+        with open(note_path(root, tid), "a", encoding="utf-8") as f:
             f.write(f"- {now()} [{agent}] {msg}\n")
 
 
@@ -368,7 +368,7 @@ def fmt_row(tid, task, unresolved):
     line = (f"{tid:<10} {task['status']:<12} {task.get('priority', 'normal'):<7} "
             f"{assignee:<14} {task['title']}")
     if unresolved:
-        line += f"  [blocked ← {', '.join(unresolved)}]"
+        line += f"  [blocked <- {', '.join(unresolved)}]"
     if task.get("model"):
         line += f"  [model {task['model']}]"
     if task.get("resources"):
@@ -393,30 +393,30 @@ FOLDER_README = """# agent-tasks queue
 Machine-managed task queue shared by planner and worker agents
 (https://github.com/{gh}/simple-subagent-dispatcher).
 
-- `index.json` — source of truth for task **metadata**: status, assignee,
+- `index.json` -- source of truth for task **metadata**: status, assignee,
   blockers, priority, tags. Change these via the `tasks.py` CLI only, never by
   hand-editing this file (the CLI serializes concurrent writers).
-- `tasks/TASK-NNN.md` — one note per task. The note body is free-form and
-  agents are meant to edit it directly (description, notes, findings) — that is
+- `tasks/TASK-NNN.md` -- one note per task. The note body is free-form and
+  agents are meant to edit it directly (description, notes, findings) -- that is
   the point of the system. Keep **Work log** as the last section; the CLI
   appends entries to the end of the file.
 
-- `config.json` — optional per-project dispatcher defaults (this is where a
+- `config.json` -- optional per-project dispatcher defaults (this is where a
   project records its own judgment calls). All keys optional:
   `worktree` (false), `worktree_root` (sibling `<repo>-worktrees/`),
-  `runner` (["uv", "run", "python"] — interpreter argv composed into worker
+  `runner` (["uv", "run", "python"] -- interpreter argv composed into worker
   prompts, allowlists, and the bootstrap invocation),
-  `lease_minutes` (90 — claim lease length; expired claims are stealable),
-  `model_tiers` (["haiku","sonnet","opus"] — ordering behind `--tier`),
-  `mutex_stale_minutes` (30 — named-mutex stale-steal timeout),
+  `lease_minutes` (90 -- claim lease length; expired claims are stealable),
+  `model_tiers` (["haiku","sonnet","opus"] -- ordering behind `--tier`),
+  `mutex_stale_minutes` (30 -- named-mutex stale-steal timeout),
   `model` (claude CLI default), `permission_mode` ("acceptEdits"),
-  `allowed_tools` ([] — extra permission rules for what your workers may run),
-  `bootstrap` (".claude/task-worker-bootstrap.py" — a Python script),
-  `claude_bin` ("claude" — string or argv list), `extra_args` ([]).
-- `runtime/` — machine-local dispatcher state (worker registry, spawn logs);
+  `allowed_tools` ([] -- extra permission rules for what your workers may run),
+  `bootstrap` (".claude/task-worker-bootstrap.py" -- a Python script),
+  `claude_bin` ("claude" -- string or argv list), `extra_args` ([]).
+- `runtime/` -- machine-local dispatcher state (worker registry, spawn logs);
   self-gitignored, never committed.
 
-Statuses: open → in_progress → review → done (or cancelled).
+Statuses: open -> in_progress -> review -> done (or cancelled).
 A blocker that names a task id auto-resolves when that task is done/cancelled;
 free-text blockers stay until removed with `unblock`.
 
@@ -426,15 +426,24 @@ project (with history for free). Projects that prefer not to can gitignore it.
 
 
 def cmd_init(args):
+    """Create the queue folder. Re-runnable: creates whatever is missing and
+    never overwrites what exists, so a half-made folder (crashed init, partial
+    checkout) heals instead of passing a naive existence check."""
     root = os.path.abspath(os.environ.get(DIR_ENV) or os.path.join(os.getcwd(), DIR_NAME))
-    if os.path.exists(os.path.join(root, INDEX)):
-        print(f"already initialized: {root}")
-        return
+    created = []
     os.makedirs(os.path.join(root, TASKS_SUBDIR), exist_ok=True)
-    save_index(root, {"version": 1, "tasks": {}})
-    with open(os.path.join(root, "README.md"), "w") as f:
-        f.write(FOLDER_README.format(gh=args.github or "bs7280"))
-    print(f"initialized {root}")
+    if not os.path.exists(os.path.join(root, INDEX)):
+        save_index(root, {"version": 1, "tasks": {}})
+        created.append(INDEX)
+    readme = os.path.join(root, "README.md")
+    if not os.path.exists(readme):
+        with open(readme, "w", encoding="utf-8") as f:
+            f.write(FOLDER_README.format(gh=args.github or "bs7280"))
+        created.append("README.md")
+    if created:
+        print(f"initialized {root} ({', '.join(created)})")
+    else:
+        print(f"already initialized: {root}")
 
 
 def cmd_create(args):
@@ -512,13 +521,13 @@ def cmd_show(args):
     print(fmt_row(tid, task, unresolved_blockers(index, task)))
     if task.get("lease_until"):
         print(f"lease: until {task['lease_until']}"
-              + ("  (EXPIRED — claimable)" if lease_expired(task) else ""))
+              + ("  (EXPIRED -- claimable)" if lease_expired(task) else ""))
     if task.get("tags"):
         print(f"tags: {', '.join(task['tags'])}")
     print(f"note: {path}")
     print("-" * 60)
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             sys.stdout.write(f.read())
     except OSError:
         print("(note file missing)")
@@ -614,8 +623,8 @@ def _set_status(root, raw_id, new_status, agent, summary=None):
         set_note_status(root, tid, new_status)
         if summary:
             append_log(root, tid, agent, summary)
-        append_log(root, tid, agent, f"status: {old} → {new_status}")
-    print(f"{tid} status: {old} → {new_status}")
+        append_log(root, tid, agent, f"status: {old} -> {new_status}")
+    print(f"{tid} status: {old} -> {new_status}")
 
 
 def cmd_status(args):
@@ -695,9 +704,9 @@ def cmd_heartbeat(args):
         tid = resolve_id(index, args.id)
         task = index["tasks"][tid]
         if task["status"] != "in_progress":
-            die(f"{tid} is {task['status']}, not in_progress — nothing to heartbeat")
+            die(f"{tid} is {task['status']}, not in_progress -- nothing to heartbeat")
         if task.get("assignee") != assignee and not args.force:
-            die(f"{tid} is assigned to {task.get('assignee')}, not {assignee} — "
+            die(f"{tid} is assigned to {task.get('assignee')}, not {assignee} -- "
                 "your expired claim may have been stolen; stop working on it "
                 "(--force extends the lease anyway)")
         task["lease_until"] = compute_lease(cfg)
@@ -718,7 +727,7 @@ def _runtime_dir(root):
     os.makedirs(rt, exist_ok=True)
     gi = os.path.join(rt, ".gitignore")
     if not os.path.exists(gi):
-        with open(gi, "w") as f:
+        with open(gi, "w", encoding="utf-8") as f:
             f.write("*\n")
     return rt
 
@@ -738,7 +747,7 @@ def _write_mutex(path, agent, cfg):
                            .strftime("%Y-%m-%dT%H:%M:%SZ")}
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".mtx-",
                                suffix=".tmp")
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, path)
 
@@ -754,7 +763,7 @@ def cmd_lock(args):
     with Lock(root):
         if os.path.exists(path):
             try:
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     cur = json.load(f)
             except ValueError:
                 cur = {}
@@ -763,7 +772,7 @@ def cmd_lock(args):
                       f"since {cur.get('acquired')}")
                 sys.exit(4)
             _write_mutex(path, agent, cfg)
-            print(f"locked {args.name} ({agent}) — stole stale lock from "
+            print(f"locked {args.name} ({agent}) -- stole stale lock from "
                   f"{cur.get('holder')} (acquired {cur.get('acquired')})")
             return
         _write_mutex(path, agent, cfg)
@@ -779,12 +788,12 @@ def cmd_unlock(args):
             print(f"{args.name} is not locked")
             return
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 cur = json.load(f)
         except ValueError:
             cur = {}
         if cur.get("holder") != agent and not args.force:
-            die(f"{args.name} is held by {cur.get('holder')}, not {agent} — "
+            die(f"{args.name} is held by {cur.get('holder')}, not {agent} -- "
                 "use --force to break it")
         os.unlink(path)
     print(f"unlocked {args.name} ({agent})")
@@ -792,10 +801,10 @@ def cmd_unlock(args):
 
 def _note_frontmatter_status(root, tid):
     """Read the display-only status line from a note. (Nothing else ever
-    reads it back — index.json is authoritative; this exists only so doctor
+    reads it back -- index.json is authoritative; this exists only so doctor
     can detect drift.)"""
     try:
-        with open(note_path(root, tid)) as f:
+        with open(note_path(root, tid), encoding="utf-8") as f:
             text = f.read()
     except OSError:
         return None, False
@@ -816,7 +825,7 @@ def cmd_doctor(args):
             findings.append(f"{tid}: index entry has no note file ({task['note']})")
             continue
         if note_status is not None and note_status != task["status"]:
-            findings.append(f"{tid}: status drift — index '{task['status']}' vs "
+            findings.append(f"{tid}: status drift -- index '{task['status']}' vs "
                             f"note frontmatter '{note_status}' (index wins)")
             if args.fix:
                 with Lock(root):
@@ -834,7 +843,7 @@ def cmd_doctor(args):
     workers_path = os.path.join(root, "runtime", "workers.json")
     if os.path.isfile(workers_path):
         try:
-            with open(workers_path) as f:
+            with open(workers_path, encoding="utf-8") as f:
                 workers = json.load(f)
         except ValueError:
             workers = {}
@@ -849,7 +858,7 @@ def cmd_doctor(args):
     for tid, task in sorted(index["tasks"].items()):
         if (task["status"] == "in_progress" and task.get("assignee")
                 and lease_expired(task) and tid not in live_tasks):
-            findings.append(f"{tid}: orphan claim — assignee {task['assignee']}, "
+            findings.append(f"{tid}: orphan claim -- assignee {task['assignee']}, "
                             f"lease expired {task['lease_until']}, no live worker "
                             f"(claimable; next/claim will steal it)")
 
@@ -895,7 +904,7 @@ def cmd_board(args):
         for tid in ids:
             task = index["tasks"][tid]
             assignee = f"({task['assignee']})  " if task.get("assignee") else ""
-            marker = f"  [blocked ← {', '.join(blocked[tid])}]" if tid in blocked else ""
+            marker = f"  [blocked <- {', '.join(blocked[tid])}]" if tid in blocked else ""
             print(f"  {tid}  {assignee}{task['title']}{marker}")
     if expired:
         print("expired lease (claimable):")
@@ -908,7 +917,7 @@ def cmd_board(args):
         print("resources held:")
         for tag in sorted(held):
             holder = index["tasks"][held[tag]]
-            print(f"  {tag} ← {held[tag]} ({holder.get('assignee')})")
+            print(f"  {tag} <- {held[tag]} ({holder.get('assignee')})")
     print(f"done: {len(by_status['done'])}, cancelled: {len(by_status['cancelled'])}")
 
 

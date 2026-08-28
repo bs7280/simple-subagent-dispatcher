@@ -3,6 +3,7 @@
 
 Stdlib only, cross-platform (no shell). Run: uv run python tests/smoke.py
 """
+import ast
 import json
 import os
 import re
@@ -11,6 +12,9 @@ import subprocess
 import sys
 import tempfile
 import time
+
+SCRIPTS_DIR = os.path.abspath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, "scripts"))
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, os.pardir, "scripts", "tasks.py"))
@@ -65,7 +69,7 @@ def test_lifecycle(tmp):
     listing = q.out("list")
     for tid, blocker in ((t2, t1), (t3, "waiting on API key")):
         row = next(l for l in listing.splitlines() if l.startswith(tid))
-        if f"blocked ← {blocker}" not in row:
+        if f"blocked <- {blocker}" not in row:
             fail(f"{tid} not shown blocked on {blocker}")
 
     if q.out("next").split()[0] != t1:
@@ -264,7 +268,7 @@ def test_resources(tmp):
         fail("next should now skip both held tags")
 
     board = q.out("board")
-    if "resources held:" not in board or f"db ← {r1}" not in board:
+    if "resources held:" not in board or f"db <- {r1}" not in board:
         fail(f"board should show held resources:\n{board}")
     if q.js("board", "--json")["resources_held"] != {"db": r1, "browser": r3}:
         fail("board json resources_held")
@@ -390,9 +394,75 @@ def test_concurrent_logs(tmp):
             fail(f"torn/interleaved log line: {line!r}")
 
 
+def test_utf8_discipline(tmp):
+    """Windows runs cp1252 by default: sources must be pure ASCII, and every
+    text-mode open() must pin encoding="utf-8" (enforced by AST lint so a new
+    call can't slip in unpinned)."""
+    for fname in ("tasks.py", "dispatch.py", "procs.py"):
+        path = os.path.join(SCRIPTS_DIR, fname)
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        if not src.isascii():
+            bad = sorted({c for c in src if not c.isascii()})
+            fail(f"{fname} contains non-ASCII characters: {bad}")
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if isinstance(fn, ast.Name) and fn.id == "open":
+                pass  # builtin open
+            elif (isinstance(fn, ast.Attribute) and fn.attr == "fdopen"):
+                pass  # os.fdopen
+            else:
+                continue  # os.open etc. are raw-fd, no encoding concept
+            mode = "r"
+            args = node.args
+            if len(args) >= 2 and isinstance(args[1], ast.Constant):
+                mode = args[1].value
+            for kw in node.keywords:
+                if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
+                    mode = kw.value.value
+            if isinstance(mode, str) and "b" in mode:
+                continue
+            if not any(kw.arg == "encoding" for kw in node.keywords):
+                fail(f"{fname}:{node.lineno}: text-mode open() without encoding=")
+
+    # stdio survives a cp1252 console (the redirected-output case)
+    q = Queue(tmp)
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252:strict"}
+    def run_cp1252(*args):
+        res = subprocess.run([PY, CLI, *args], cwd=tmp, env=env,
+                             capture_output=True, text=True)
+        if res.returncode not in (0, 1):
+            fail(f"cp1252 stdio crash: tasks {' '.join(args)}\n{res.stderr}")
+        return res
+    run_cp1252("init")
+    run_cp1252("create", "First", "--priority", "high")
+    run_cp1252("create", "Second", "--blocked-by", "TASK-001")
+    run_cp1252("claim", "TASK-001", "--assignee", "w")
+    run_cp1252("status", "TASK-001", "review", "--agent", "w")  # prints old -> new
+    run_cp1252("list")   # prints blocked <- markers
+    run_cp1252("board")
+    run_cp1252("show", "TASK-002")
+
+    # init is re-runnable: recreate whatever went missing, overwrite nothing
+    readme = os.path.join(tmp, ".agent-tasks", "README.md")
+    os.remove(readme)
+    out = q.out("init")
+    if "README.md" not in out or not os.path.isfile(readme):
+        fail(f"init should recreate a missing README.md: {out}")
+    index_before = q.note_text("TASK-001")  # notes untouched by re-init
+    q.run("init")
+    if q.note_text("TASK-001") != index_before:
+        fail("re-init must never touch existing files")
+    if len(q.js("list", "--all", "--json")) != 2:
+        fail("re-init must not reset the index")
+
+
 def main():
     for test in (test_lifecycle, test_leases, test_tiers, test_resources,
-                 test_doctor, test_mutex, test_concurrent_logs):
+                 test_doctor, test_mutex, test_concurrent_logs,
+                 test_utf8_discipline):
         tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
         try:
             test(tmp)

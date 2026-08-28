@@ -61,7 +61,7 @@ def ensure_runtime(root):
     os.makedirs(os.path.join(rt, "logs"), exist_ok=True)
     gi = os.path.join(rt, ".gitignore")
     if not os.path.exists(gi):
-        with open(gi, "w") as f:
+        with open(gi, "w", encoding="utf-8") as f:
             f.write("*\n")  # machine-local state: never committed
     return rt
 
@@ -70,14 +70,14 @@ def load_workers(root):
     path = os.path.join(root, RUNTIME, WORKERS_FILE)
     if not os.path.isfile(path):
         return {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
 def save_workers(root, workers):
     rt = ensure_runtime(root)
     fd, tmp = tempfile.mkstemp(dir=rt, prefix=".workers-", suffix=".tmp")
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(workers, f, indent=2)
         f.write("\n")
     os.replace(tmp, os.path.join(rt, WORKERS_FILE))
@@ -173,7 +173,7 @@ Hard rules:
 - If you commit in a shared checkout (you were not given a dedicated
   worktree): first {run} "{cli}" lock commit --agent {agent}
   (exit code 4 = busy: wait ~30s and retry a few times). Stage ONLY the files
-  you changed, by name — never git add -A / -u / commit -a, which would sweep
+  you changed, by name -- never git add -A / -u / commit -a, which would sweep
   up other workers' half-done edits. Commit, then
   {run} "{cli}" unlock commit --agent {agent}
 - If the agent-tasks plugin's task-worker skill is available, it restates
@@ -252,7 +252,7 @@ def _revert_preclaim(root, tid, agent):
             tasks.save_index(root, index)
             tasks.set_note_status(root, tid, "open")
             tasks.append_log(root, tid, "dispatcher",
-                             "spawn failed — reverted pre-claim to open")
+                             "spawn failed -- reverted pre-claim to open")
 
 
 def cmd_start(args):
@@ -429,7 +429,7 @@ def cmd_watch(args):
         parse = (lambda line: [line.rstrip("\n")] if line.strip() else [])
         print(f"transcript not found for session {w['session_id']} -- "
               f"showing spawn log instead: {path}  (worker {wid}, {worker_state(w)})")
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         events = [e for line in f for e in parse(line)]
         if not args.from_start:
             events = events[-args.tail:]
