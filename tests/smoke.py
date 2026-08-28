@@ -332,9 +332,48 @@ def test_doctor(tmp):
         fail(f"missing note not flagged: {out}")
 
 
+def test_mutex(tmp):
+    q = Queue(tmp)
+    q.run("init")
+
+    if "locked build (a)" not in q.out("lock", "build", "--agent", "a"):
+        fail("lock acquire output")
+    res = q.run("lock", "build", "--agent", "b", check=False)
+    if res.returncode != 4:
+        fail(f"second lock should exit 4 BUSY, got {res.returncode}")
+    if "BUSY" not in res.stdout or "held by a" not in res.stdout:
+        fail(f"BUSY should name the holder: {res.stdout}")
+    if q.run("unlock", "build", "--agent", "b", check=False).returncode == 0:
+        fail("non-holder unlock should fail")
+    q.run("unlock", "build", "--agent", "a")
+    q.run("lock", "build", "--agent", "b")
+    q.run("unlock", "build", "--agent", "b")
+    if "not locked" not in q.out("unlock", "build", "--agent", "b"):
+        fail("unlock of unheld mutex should be a friendly no-op")
+
+    # stale steal
+    with open(os.path.join(tmp, ".agent-tasks", "config.json"), "w") as f:
+        json.dump({"mutex_stale_minutes": 0.02}, f)  # 1.2s
+    q.run("lock", "gpu", "--agent", "a")
+    res = q.run("lock", "gpu", "--agent", "b", check=False)
+    if res.returncode != 4:
+        fail("fresh lock should still be BUSY")
+    time.sleep(2.5)
+    out = q.out("lock", "gpu", "--agent", "b")
+    if "stole stale lock from a" not in out:
+        fail(f"stale steal not reported: {out}")
+    q.run("unlock", "gpu", "--agent", "b")
+
+    if q.run("lock", "../evil", "--agent", "a", check=False).returncode == 0:
+        fail("path-traversal mutex name should be rejected")
+    # mutexes are machine-local: they live under self-gitignored runtime/
+    if not os.path.isfile(os.path.join(tmp, ".agent-tasks", "runtime", ".gitignore")):
+        fail("runtime self-gitignore missing")
+
+
 def main():
     for test in (test_lifecycle, test_leases, test_tiers, test_resources,
-                 test_doctor):
+                 test_doctor, test_mutex):
         tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
         try:
             test(tmp)

@@ -55,6 +55,7 @@ CONFIG_DEFAULTS = {
     "lease_minutes": 90,  # claim lease length; an expired lease is stealable
     "model_tiers": ["haiku", "sonnet", "opus"],  # ordered cheap → capable,
                                                  # for next/claim --tier
+    "mutex_stale_minutes": 30,  # named mutex (lock/unlock) stale-steal timeout
     # -- dispatcher --
     "worktree": False,          # isolate each worker in a git worktree?
     "worktree_root": None,      # default: sibling "<repo>-worktrees/"
@@ -391,6 +392,7 @@ Machine-managed task queue shared by planner and worker agents
   prompts, allowlists, and the bootstrap invocation),
   `lease_minutes` (90 — claim lease length; expired claims are stealable),
   `model_tiers` (["haiku","sonnet","opus"] — ordering behind `--tier`),
+  `mutex_stale_minutes` (30 — named-mutex stale-steal timeout),
   `model` (claude CLI default), `permission_mode` ("acceptEdits"),
   `allowed_tools` ([] — extra permission rules for what your workers may run),
   `bootstrap` (".claude/task-worker-bootstrap.py" — a Python script),
@@ -694,6 +696,84 @@ def cmd_note(args):
     print(note_path(root, resolve_id(index, args.id)))
 
 
+def _runtime_dir(root):
+    """Machine-local state: self-gitignored, never committed."""
+    rt = os.path.join(root, "runtime")
+    os.makedirs(rt, exist_ok=True)
+    gi = os.path.join(rt, ".gitignore")
+    if not os.path.exists(gi):
+        with open(gi, "w") as f:
+            f.write("*\n")
+    return rt
+
+
+def _mutex_path(root, name):
+    if not re.match(r"^[A-Za-z0-9._-]+$", name):
+        die(f"bad mutex name '{name}' (letters, digits, dot, dash, underscore only)")
+    locks = os.path.join(_runtime_dir(root), "locks")
+    os.makedirs(locks, exist_ok=True)
+    return os.path.join(locks, f"{name}.json")
+
+
+def _write_mutex(path, agent, cfg):
+    delta = timedelta(minutes=float(cfg["mutex_stale_minutes"]))
+    data = {"holder": agent, "acquired": now(),
+            "stale_after": (datetime.now(timezone.utc) + delta)
+                           .strftime("%Y-%m-%dT%H:%M:%SZ")}
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".mtx-",
+                               suffix=".tmp")
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+def cmd_lock(args):
+    """Acquire a named mutex (e.g. `lock commit` around a shared-tree commit).
+    Single attempt: exit 4 = BUSY with the holder named. A stale lock (holder
+    crashed; past mutex_stale_minutes) is stolen automatically."""
+    root = find_dir()
+    cfg = load_config(root)
+    agent = default_agent(args.agent)
+    path = _mutex_path(root, args.name)
+    with Lock(root):
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    cur = json.load(f)
+            except ValueError:
+                cur = {}
+            if not (cur.get("stale_after") and now() > cur["stale_after"]):
+                print(f"BUSY: {args.name} held by {cur.get('holder')} "
+                      f"since {cur.get('acquired')}")
+                sys.exit(4)
+            _write_mutex(path, agent, cfg)
+            print(f"locked {args.name} ({agent}) — stole stale lock from "
+                  f"{cur.get('holder')} (acquired {cur.get('acquired')})")
+            return
+        _write_mutex(path, agent, cfg)
+    print(f"locked {args.name} ({agent})")
+
+
+def cmd_unlock(args):
+    root = find_dir()
+    agent = default_agent(args.agent)
+    path = _mutex_path(root, args.name)
+    with Lock(root):
+        if not os.path.exists(path):
+            print(f"{args.name} is not locked")
+            return
+        try:
+            with open(path) as f:
+                cur = json.load(f)
+        except ValueError:
+            cur = {}
+        if cur.get("holder") != agent and not args.force:
+            die(f"{args.name} is held by {cur.get('holder')}, not {agent} — "
+                "use --force to break it")
+        os.unlink(path)
+    print(f"unlocked {args.name} ({agent})")
+
+
 def _note_frontmatter_status(root, tid):
     """Read the display-only status line from a note. (Nothing else ever
     reads it back — index.json is authoritative; this exists only so doctor
@@ -917,6 +997,18 @@ def main():
     p = sub.add_parser("note", help="print the path to a task's note file")
     p.add_argument("id")
     p.set_defaults(func=cmd_note)
+
+    p = sub.add_parser("lock", help="acquire a named mutex (exit 4 = BUSY); "
+                                    "stale locks are stolen after a timeout")
+    p.add_argument("name")
+    agent_flag(p)
+    p.set_defaults(func=cmd_lock)
+
+    p = sub.add_parser("unlock", help="release a named mutex you hold")
+    p.add_argument("name")
+    p.add_argument("--force", action="store_true", help="break someone else's lock")
+    agent_flag(p)
+    p.set_defaults(func=cmd_unlock)
 
     p = sub.add_parser("doctor", help="integrity report: index/note drift, "
                                       "orphan claims, strays (exit 1 on findings)")

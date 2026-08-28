@@ -104,6 +104,7 @@ queue at any time.
 | `log ID MESSAGE` | append a timestamped work-log entry to the note |
 | `note ID` | print the note file's path |
 | `board [--json]` | one-screen status overview |
+| `lock NAME --agent X` / `unlock NAME --agent X` | named mutex for shared-checkout spans (e.g. `lock commit`); exit 4 = BUSY naming the holder; stale locks stolen after `mutex_stale_minutes` (default 30) |
 | `doctor [--fix]` | integrity report: index/note status drift, orphan claims, stray/missing notes; exit 1 on findings (`--fix` rewrites drifted frontmatter from the index) |
 
 IDs are forgiving: `TASK-012`, `task-012`, and `12` all work. Every mutating
@@ -144,7 +145,10 @@ latest worker).
 By default workers run **in the repo checkout**. `--worktree` gives each worker
 an isolated `git worktree` (branch `agent-tasks/<worker-id>`, placed in a
 sibling `<repo>-worktrees/` dir) — necessary when parallel workers touch
-overlapping files, overkill when they don't. Neither is required: set your
+overlapping files, overkill when they don't. Shared-tree workers are taught
+commit discipline: wrap stage→commit in the `lock commit` named mutex and
+stage only named files (never `git add -A`), so concurrent workers can't
+sweep up each other's half-done edits. Neither is required: set your
 project's default in **`.agent-tasks/config.json`** (all keys optional):
 
 ```json

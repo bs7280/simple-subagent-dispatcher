@@ -170,6 +170,12 @@ Hard rules:
   finishes -- that is death, not patience. Run long commands in the foreground.
 - Never touch DB migrations, permissions/financial data, force pushes, or
   deploys unless the task note explicitly says to.
+- If you commit in a shared checkout (you were not given a dedicated
+  worktree): first {run} "{cli}" lock commit --agent {agent}
+  (exit code 4 = busy: wait ~30s and retry a few times). Stage ONLY the files
+  you changed, by name — never git add -A / -u / commit -a, which would sweep
+  up other workers' half-done edits. Commit, then
+  {run} "{cli}" unlock commit --agent {agent}
 - If the agent-tasks plugin's task-worker skill is available, it restates
   these rules; follow it.{extra}"""
 

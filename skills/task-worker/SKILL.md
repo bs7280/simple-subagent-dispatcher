@@ -72,6 +72,21 @@ Your agent name: use what the dispatch prompt assigned you (e.g.
    - `tasks status TASK-042 review`. **Never mark your own task `done`** —
      closing is the reviewer's call.
 
+## Shared-checkout commit discipline
+
+When you were **not** given your own worktree, other workers may share your
+working tree. Wrap the stage→commit span in the named mutex:
+
+1. `tasks lock commit --agent <you>` — exit code 4 = BUSY (holder is named):
+   another worker is mid-commit; wait ~30s and retry a few times.
+2. Stage **only the files you changed, by name**: `git add path/a path/b`.
+   Never `git add -A`, `git add -u`, or `git commit -a` — they sweep up other
+   workers' half-done edits.
+3. Commit, then `tasks unlock commit --agent <you>`.
+
+A crashed holder's lock goes stale and is stolen automatically after
+`mutex_stale_minutes` (default 30).
+
 ## Hard rules
 
 - One task. Yours. Only.
