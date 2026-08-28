@@ -172,9 +172,11 @@ project's default in **`.agent-tasks/config.json`** (all keys optional):
 
 - **Permissions** — the default is `acceptEdits`, plus an automatic allowlist
   entry for the queue CLI itself, composed from the configured `runner` in
-  both quoting styles so pre-approvals always match the prompts (claim/log/
-  heartbeat/block/finish work unattended), plus whatever rules you put in
-  `allowed_tools` (e.g.
+  both quoting styles so pre-approvals always match the prompts, plus whatever
+  rules you put in `allowed_tools`. In the other direction, dispatched workers
+  get `--disallowedTools` rules denying `Edit`/`Write`/`NotebookEdit` on
+  `index.json` and `tasks/**` — queue state is read-only to them, while the
+  outbox stays writable (it's the sanctioned surface) (e.g.
   `"Bash(pnpm test:*)"`, `"Bash(git commit:*)"` — the commands *your* workers
   need). Everything else is **denied, never prompted** — a headless session
   can't answer a prompt, and a denied action lets the run continue and shows

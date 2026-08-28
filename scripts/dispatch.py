@@ -339,6 +339,15 @@ def claude_cmd(cfg, args, base):
     rules = [f'Bash({run} "{cli}":*)', f"Bash({run} {cli}:*)"]
     rules += list(cfg["allowed_tools"])
     cmd += ["--allowedTools", " ".join(rules)]
+    # Queue state is read-only to dispatched workers: deny native file-tool
+    # writes on the index and the task notes. Reads stay open, and the outbox
+    # dir under runtime/ is deliberately NOT covered -- it is the sanctioned
+    # write surface. Forward slashes so the rules match on Windows too.
+    qroot = cfg["_root"].replace(os.sep, "/")
+    deny = []
+    for target in (f"{qroot}/index.json", f"{qroot}/tasks/**"):
+        deny += [f"Edit({target})", f"Write({target})", f"NotebookEdit({target})"]
+    cmd += ["--disallowedTools", " ".join(deny)]
     # the queue folder is an additional working directory so the worker's
     # ordinary file tools can write its outbox even from a worktree
     cmd += ["--add-dir", cfg["_root"]]
