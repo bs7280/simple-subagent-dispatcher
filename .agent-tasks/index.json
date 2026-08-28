@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "tasks": {
+    "TASK-001": {
+      "title": "Add CI: run both smoke suites on push",
+      "status": "open",
+      "priority": "high",
+      "assignee": null,
+      "blockers": [],
+      "tags": [
+        "ci"
+      ],
+      "created": "2026-08-28T17:43:16Z",
+      "updated": "2026-08-28T17:43:16Z",
+      "note": "tasks/TASK-001.md"
+    },
+    "TASK-002": {
+      "title": "Make work-log appending robust to sections after Work log",
+      "status": "open",
+      "priority": "normal",
+      "assignee": null,
+      "blockers": [],
+      "tags": [
+        "cli"
+      ],
+      "created": "2026-08-28T17:43:16Z",
+      "updated": "2026-08-28T17:43:16Z",
+      "note": "tasks/TASK-002.md"
+    },
+    "TASK-003": {
+      "title": "Handle stale worker registry entries after reboot",
+      "status": "open",
+      "priority": "normal",
+      "assignee": null,
+      "blockers": [],
+      "tags": [
+        "dispatcher"
+      ],
+      "created": "2026-08-28T17:43:16Z",
+      "updated": "2026-08-28T17:43:16Z",
+      "note": "tasks/TASK-003.md"
+    },
+    "TASK-004": {
+      "title": "Dedicated verification workers (VERIFY- tasks)",
+      "status": "open",
+      "priority": "low",
+      "assignee": null,
+      "blockers": [],
+      "tags": [
+        "design"
+      ],
+      "created": "2026-08-28T17:43:17Z",
+      "updated": "2026-08-28T17:43:17Z",
+      "note": "tasks/TASK-004.md"
+    },
+    "TASK-005": {
+      "title": "MCP wrapper for the queue CLI",
+      "status": "open",
+      "priority": "low",
+      "assignee": null,
+      "blockers": [
+        "CLI surface still stabilizing through real use"
+      ],
+      "tags": [
+        "mcp"
+      ],
+      "created": "2026-08-28T17:43:17Z",
+      "updated": "2026-08-28T17:43:17Z",
+      "note": "tasks/TASK-005.md"
+    }
+  }
+}

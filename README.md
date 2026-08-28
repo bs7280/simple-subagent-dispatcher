@@ -213,9 +213,12 @@ can gitignore the folder instead — that's a per-project call.
 
 ## Roadmap
 
-- Dedicated verification workers (`VERIFY-` tasks draining an untested-gaps
-  queue; they serialize naturally on the browser slot).
-- MCP wrapper once the CLI surface stabilizes through use.
+This repo dogfoods itself: the backlog lives in [`.agent-tasks/`](.agent-tasks/)
+in exactly the format the plugin ships. Browse the task notes there, or:
+
+```bash
+python3 scripts/tasks.py board
+```
 
 ## License
 
