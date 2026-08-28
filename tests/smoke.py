@@ -201,8 +201,44 @@ def test_leases(tmp):
         fail("heartbeat on non-in_progress should fail")
 
 
+def test_tiers(tmp):
+    q = Queue(tmp)
+    q.run("init")
+    a = q.out("create", "Opus job", "--model", "opus").split()[1]
+    b = q.out("create", "Haiku job", "--model", "haiku").split()[1]
+    c = q.out("create", "Any-model job").split()[1]
+    d = q.out("create", "Unknown-model job", "--model", "fable").split()[1]
+
+    # haiku tier: skips opus and unknown (with a why), picks the haiku task
+    res = q.run("next", "--tier", "haiku")
+    if res.stdout.split()[0] != b:
+        fail(f"--tier haiku should pick {b}: {res.stdout}")
+    if "excluded from --tier haiku" not in res.stderr or d not in res.stderr:
+        fail(f"unknown-model exclusion not explained: {res.stderr}")
+
+    q.run("next", "--claim", "--tier", "haiku", "--assignee", "h")
+    if q.js("show", b, "--json")["assignee"] != "h":
+        fail("next --claim --tier claimed the wrong task")
+    q.run("next", "--claim", "--tier", "haiku", "--assignee", "h")  # -> c (unset model)
+    if q.js("show", c, "--json")["assignee"] != "h":
+        fail("model-unset task should be claimable at any tier")
+    if q.run("next", "--tier", "haiku", check=False).returncode != 1:
+        fail("haiku tier must never see the opus task")
+
+    # direct claim honors --tier; no tier means no gate
+    res = q.run("claim", a, "--tier", "haiku", "--assignee", "h", check=False)
+    if res.returncode == 0 or "outside your tier" not in res.stderr:
+        fail(f"claim --tier should refuse opus task: {res.stderr}")
+    q.run("claim", a, "--tier", "opus", "--assignee", "o")
+    if q.run("claim", d, "--tier", "opus", "--assignee", "o", check=False).returncode == 0:
+        fail("unknown model must be excluded from tier claims")
+    q.run("claim", d, "--assignee", "o")  # tierless claim still fine
+    if q.run("claim", c, "--tier", "turbo9000", "--assignee", "x", check=False).returncode == 0:
+        fail("bogus tier name should be rejected")
+
+
 def main():
-    for test in (test_lifecycle, test_leases):
+    for test in (test_lifecycle, test_leases, test_tiers):
         tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
         try:
             test(tmp)

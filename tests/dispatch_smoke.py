@@ -146,6 +146,17 @@ def run_all(tmp):
     disp("wait", t1, check=False)
     disp("wait", wid[:12], check=False)
 
+    # ---- task-pinned model beats config model ----
+    tm = tasksc("create", "Sonnet-pinned task", "--model", "sonnet").stdout.split()[1]
+    wm = started_id(disp("start", tm))
+    time.sleep(1)
+    if "--model sonnet" not in log_text(wm):
+        fail("task-pinned model not in spawned command line")
+    if "model sonnet" not in open(os.path.join(
+            repo, ".agent-tasks", "tasks", f"{tm}.md")).read():
+        fail("dispatched model not logged to task note")
+    disp("wait", wm, check=False)
+
     # ---- worktree mode + python bootstrap hook ----
     os.makedirs(os.path.join(repo, ".claude"), exist_ok=True)
     with open(os.path.join(repo, ".claude", "task-worker-bootstrap.py"), "w") as f:

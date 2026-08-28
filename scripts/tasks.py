@@ -53,6 +53,8 @@ CONFIG_DEFAULTS = {
                                         # command is composed (prompts, skills,
                                         # allowlists, bootstrap)
     "lease_minutes": 90,  # claim lease length; an expired lease is stealable
+    "model_tiers": ["haiku", "sonnet", "opus"],  # ordered cheap → capable,
+                                                 # for next/claim --tier
     # -- dispatcher --
     "worktree": False,          # isolate each worker in a git worktree?
     "worktree_root": None,      # default: sibling "<repo>-worktrees/"
@@ -206,6 +208,26 @@ def unresolved_blockers(index, task):
     return out
 
 
+def tier_allows(cfg, tier, task_model, tid=None):
+    """May a --tier worker take a task with this model? Unset model: yes.
+    Unknown model names are allowed on tasks but excluded from tier selection
+    (we can't rank what we can't find in model_tiers)."""
+    if not task_model:
+        return True
+    tiers = cfg["model_tiers"]
+    if task_model not in tiers:
+        if tid:
+            print(f"note: {tid} excluded from --tier {tier}: model "
+                  f"'{task_model}' not in model_tiers {tiers}", file=sys.stderr)
+        return False
+    return tiers.index(task_model) <= tiers.index(tier)
+
+
+def check_tier(cfg, tier):
+    if tier not in cfg["model_tiers"]:
+        die(f"unknown tier '{tier}' (model_tiers: {cfg['model_tiers']})")
+
+
 def apply_claim(root, index, tid, assignee, cfg, force=False):
     """Claim a task under an already-held Lock. Returns an error message, or
     None on success. Open tasks and expired-lease tasks are claimable; a steal
@@ -310,6 +332,8 @@ def fmt_row(tid, task, unresolved):
             f"{assignee:<14} {task['title']}")
     if unresolved:
         line += f"  [blocked ← {', '.join(unresolved)}]"
+    if task.get("model"):
+        line += f"  [model {task['model']}]"
     if lease_expired(task):
         line += "  [lease expired]"
     return line
@@ -344,6 +368,7 @@ Machine-managed task queue shared by planner and worker agents
   `runner` (["uv", "run", "python"] — interpreter argv composed into worker
   prompts, allowlists, and the bootstrap invocation),
   `lease_minutes` (90 — claim lease length; expired claims are stealable),
+  `model_tiers` (["haiku","sonnet","opus"] — ordering behind `--tier`),
   `model` (claude CLI default), `permission_mode` ("acceptEdits"),
   `allowed_tools` ([] — extra permission rules for what your workers may run),
   `bootstrap` (".claude/task-worker-bootstrap.py" — a Python script),
@@ -379,7 +404,7 @@ def cmd_create(args):
     with Lock(root):
         index = load_index(root)
         tid = new_id(index)
-        index["tasks"][tid] = {
+        entry = {
             "title": args.title,
             "status": "open",
             "priority": args.priority,
@@ -390,6 +415,9 @@ def cmd_create(args):
             "updated": ts,
             "note": f"{TASKS_SUBDIR}/{tid}.md",
         }
+        if args.model:
+            entry["model"] = args.model
+        index["tasks"][tid] = entry
         save_index(root, index)
         write_note(root, tid, args.title, args.body, args.criteria, ts)
         append_log(root, tid, agent, "created")
@@ -466,29 +494,35 @@ def _ready_tasks(index):
 
 def cmd_next(args):
     root = find_dir()
+    cfg = load_config(root)
+    if args.tier:
+        check_tier(cfg, args.tier)
+
+    def pick(index):
+        ready = _ready_tasks(index)
+        if args.tier:
+            ready = [t for t in ready
+                     if tier_allows(cfg, args.tier,
+                                    index["tasks"][t].get("model"), t)]
+        if not ready:
+            print("no ready tasks")
+            sys.exit(1)
+        return ready[0]
+
     if args.claim:
         assignee = args.assignee or os.environ.get(AGENT_ENV)
         if not assignee:
             die(f"--claim needs --assignee or ${AGENT_ENV}")
-        cfg = load_config(root)
         with Lock(root):
             index = load_index(root)
-            ready = _ready_tasks(index)
-            if not ready:
-                print("no ready tasks")
-                sys.exit(1)
-            tid = ready[0]
+            tid = pick(index)
             err = apply_claim(root, index, tid, assignee, cfg)
             if err:
                 die(err)
             task = index["tasks"][tid]
     else:
         index = load_index(root)
-        ready = _ready_tasks(index)
-        if not ready:
-            print("no ready tasks")
-            sys.exit(1)
-        tid = ready[0]
+        tid = pick(index)
         task = index["tasks"][tid]
     if args.json:
         print(json.dumps({**task_json(index, tid), "note_path": note_path(root, tid)},
@@ -509,6 +543,12 @@ def cmd_claim(args):
     with Lock(root):
         index = load_index(root)
         tid = resolve_id(index, args.id)
+        if args.tier:
+            check_tier(cfg, args.tier)
+            model = index["tasks"][tid].get("model")
+            if not tier_allows(cfg, args.tier, model, tid):
+                die(f"{tid} needs model '{model}', outside your tier "
+                    f"'{args.tier}' (model_tiers: {cfg['model_tiers']})")
         err = apply_claim(root, index, tid, assignee, cfg, force=args.force)
         if err:
             die(err)
@@ -691,6 +731,7 @@ def main():
     p.add_argument("--priority", choices=PRIORITIES, default="normal")
     p.add_argument("--tags", help="comma-separated tags")
     p.add_argument("--blocked-by", help="comma-separated blockers (task ids or free text)")
+    p.add_argument("--model", help="pin the model this task needs (e.g. opus)")
     agent_flag(p)
     p.set_defaults(func=cmd_create)
 
@@ -709,12 +750,16 @@ def main():
     p = sub.add_parser("next", help="pick the best ready task (exit 1 if none)")
     p.add_argument("--claim", action="store_true", help="atomically claim it too")
     p.add_argument("--assignee")
+    p.add_argument("--tier", help="only tasks whose model is unset or at/below "
+                                  "this model_tiers entry")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_next)
 
     p = sub.add_parser("claim", help="claim an open, unblocked task")
     p.add_argument("id")
     p.add_argument("--assignee")
+    p.add_argument("--tier", help="refuse if the task's model is above/outside "
+                                  "this model_tiers entry")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_claim)
 

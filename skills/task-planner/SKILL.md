@@ -50,6 +50,11 @@ Rules for a good task note:
   add detail — the note body is free-form markdown; only keep **Work log** as
   the last section.
 - **One reviewable unit.** If you can't state acceptance criteria, split it.
+- **Pin the model when it matters.** `--model opus` on a hard task,
+  `--model haiku` on a mechanical one; leave it unset when any model will do.
+  The dispatcher uses the task's model automatically (task > config > CLI
+  default), and tier-limited workers (`next --tier`) respect it: a haiku-tier
+  worker never picks up an opus-pinned task.
 - **Sequence with blockers.** `--blocked-by TASK-001` (or later
   `tasks block TASK-005 TASK-001`). A blocker naming a task id auto-resolves
   when that task is done/cancelled; free-text blockers (e.g. "waiting on API

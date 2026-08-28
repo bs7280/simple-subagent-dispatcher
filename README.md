@@ -91,11 +91,11 @@ queue at any time.
 | command | what it does |
 |---|---|
 | `init` | create `.agent-tasks/` in the current directory |
-| `create TITLE [--body --criteria --priority --tags --blocked-by]` | create a task + note |
+| `create TITLE [--body --criteria --priority --tags --blocked-by --model]` | create a task + note (`--model` pins the model it needs) |
 | `list [--status s1,s2] [--assignee] [--all] [--json]` | list tasks (hides done/cancelled by default) |
 | `show ID [--json]` | metadata + full note |
-| `next [--claim --assignee NAME] [--json]` | best ready task (open, unblocked, priority-ordered); exit 1 if none |
-| `claim ID --assignee NAME [--force]` | atomically claim an open, unblocked task |
+| `next [--claim --assignee NAME] [--tier MODEL] [--json]` | best ready task (open/expired-lease, unblocked, priority-ordered); `--tier` only draws tasks at/below that `model_tiers` entry; exit 1 if none |
+| `claim ID --assignee NAME [--tier MODEL] [--force]` | atomically claim an open (or expired-lease), unblocked task |
 | `heartbeat ID --assignee NAME` | extend your claim's lease during long steps |
 | `status ID STATUS` | set status: `open`, `in_progress`, `review`, `done`, `cancelled` |
 | `done ID [--summary]` | mark done (reviewer's call, not the worker's) |
@@ -150,6 +150,7 @@ project's default in **`.agent-tasks/config.json`** (all keys optional):
 {
   "runner": ["uv", "run", "python"],
   "lease_minutes": 90,
+  "model_tiers": ["haiku", "sonnet", "opus"],
   "worktree": false,
   "worktree_root": null,
   "model": null,

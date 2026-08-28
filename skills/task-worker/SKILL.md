@@ -29,7 +29,9 @@ Your agent name: use what the dispatch prompt assigned you (e.g.
 1. **Claim.**
    - Given a specific id: `tasks claim TASK-042 --assignee <you>`.
    - Told to pick one: `tasks next --claim --assignee <you>`
-     (exit code 1 = nothing ready; report that and stop).
+     (exit code 1 = nothing ready; report that and stop). If you were given a
+     model tier, add `--tier <model>` — you'll only draw tasks pinned at or
+     below your tier (or unpinned ones).
    - A failed claim means another worker got there first — that is the system
      working. Do not `--force`; report and stop (or `next --claim` if you were
      told to pick).

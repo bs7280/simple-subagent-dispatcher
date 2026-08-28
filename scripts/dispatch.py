@@ -266,6 +266,8 @@ def cmd_start(args):
             else:
                 print(f"bootstrap ok: {cfg['bootstrap']}")
 
+    if not args.model and task.get("model"):
+        args.model = task["model"]  # task > config > claude CLI default
     prompt = build_prompt(root, tid, agent, args.prompt_extra, cfg)
     cmd, model, pm = claude_cmd(cfg, args, ["--session-id", session_id])
     cmd.append(prompt)
@@ -284,7 +286,8 @@ def cmd_start(args):
         save_workers(root, workers)
         tasks.append_log(root, tid, "dispatcher",
                          f"dispatched worker {worker_id} "
-                         f"(session {session_id}, pid {proc.pid}, cwd {workdir})")
+                         f"(session {session_id}, pid {proc.pid}, "
+                         f"model {model or 'default'}, cwd {workdir})")
     print(f"started {worker_id}")
     print(f"  task: {tid}   pid: {proc.pid}   model: {model or '(default)'}   "
           f"permission-mode: {pm}")
@@ -434,6 +437,8 @@ def cmd_resume(args):
                   f"really want to restart")
     if not os.path.isdir(w["cwd"]):
         tasks.die(f"worker cwd is gone: {w['cwd']}")
+    if not args.model and w.get("model"):
+        args.model = w["model"]  # resume with the model the worker started on
     prompt = args.prompt or CONTINUATION_PROMPT.format(
         cli=cli_path(), tid=w["task"], run=runner_str(cfg))
     cmd, model, pm = claude_cmd(cfg, args, ["--resume", w["session_id"]])
