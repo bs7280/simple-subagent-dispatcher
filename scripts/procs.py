@@ -26,6 +26,21 @@ def spawn(cmd, cwd, env, stdout):
     return subprocess.Popen(cmd, **kwargs)
 
 
+def long_path(path):
+    """Windows: return a \\\\?\\-prefixed absolute path so file operations
+    survive MAX_PATH (260 chars) even when LongPathsEnabled is off -- deep
+    cwds push transcript paths under ~/.claude/projects/ past the limit,
+    where glob still LISTS the file but open() fails. POSIX: passthrough."""
+    if not WINDOWS:
+        return path
+    p = os.path.abspath(path)
+    if p.startswith("\\\\?\\"):
+        return p
+    if p.startswith("\\\\"):  # UNC share
+        return "\\\\?\\UNC" + p[1:]
+    return "\\\\?\\" + p
+
+
 def is_alive(pid):
     """True if a process with this pid is currently running. Never signals it."""
     if WINDOWS:

@@ -71,7 +71,7 @@ def load_workers(root):
     path = os.path.join(root, RUNTIME, WORKERS_FILE)
     if not os.path.isfile(path):
         return {}
-    with open(path, encoding="utf-8") as f:
+    with open(procs.long_path(path), encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -81,7 +81,7 @@ def save_workers(root, workers):
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(workers, f, indent=2)
         f.write("\n")
-    os.replace(tmp, os.path.join(rt, WORKERS_FILE))
+    os.replace(tmp, procs.long_path(os.path.join(rt, WORKERS_FILE)))
 
 
 pid_alive = procs.is_alive  # all liveness checks go through the shim
@@ -212,7 +212,7 @@ def spawn(root, workdir, cmd, log_path, agent):
            or not (k == "CLAUDECODE" or k.startswith("CLAUDE_"))}
     env["AGENT_TASKS_DIR"] = root       # one shared queue, even from worktrees
     env["AGENT_TASKS_AGENT"] = agent
-    with open(log_path, "ab") as logf:
+    with open(procs.long_path(log_path), "ab") as logf:
         logf.write((f"\n=== {tasks.now()} spawn: " + " ".join(cmd[:-1])
                     + " <prompt>\n").encode())
         logf.flush()
@@ -440,7 +440,7 @@ def cmd_watch(args):
         parse = (lambda line: [line.rstrip("\n")] if line.strip() else [])
         print(f"transcript not found for session {w['session_id']} -- "
               f"showing spawn log instead: {path}  (worker {wid}, {worker_state(w)})")
-    with open(path, encoding="utf-8") as f:
+    with open(procs.long_path(path), encoding="utf-8") as f:
         events = [e for line in f for e in parse(line)]
         if not args.from_start:
             events = events[-args.tail:]

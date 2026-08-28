@@ -4,6 +4,7 @@
 Stdlib only, cross-platform. Run: uv run python tests/procs_smoke.py
 """
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,21 @@ def main():
     for _ in range(3):
         if not procs.is_alive(os.getpid()):
             fail("own pid should read alive")
+
+    # long_path: a >260-char path is creatable/writable/readable through the
+    # helper (exercises the \\?\\ prefix on Windows; passthrough on POSIX)
+    base = tempfile.mkdtemp(prefix="procs-long-")
+    deep = base
+    while len(deep) < 280:
+        deep = os.path.join(deep, "deep-segment-of-a-very-long-path")
+        os.makedirs(procs.long_path(deep), exist_ok=True)
+    target = os.path.join(deep, "probe.txt")
+    with open(procs.long_path(target), "w", encoding="utf-8") as f:
+        f.write("long-path ok")
+    with open(procs.long_path(target), encoding="utf-8") as f:
+        if f.read() != "long-path ok":
+            fail("long_path round-trip failed")
+    shutil.rmtree(procs.long_path(base), ignore_errors=True)
 
     print("ALL PROCS SMOKE TESTS PASSED")
 
