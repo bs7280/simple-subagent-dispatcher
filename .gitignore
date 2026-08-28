@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.DS_Store
+# this repo's own dogfood queue, if one gets created while testing
+.agent-tasks/

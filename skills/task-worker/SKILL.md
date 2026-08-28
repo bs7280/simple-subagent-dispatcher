@@ -1,0 +1,68 @@
+---
+name: task-worker
+description: Work exactly one task from the .agent-tasks file-based queue as a worker agent — claim it, execute only that scope, narrate progress in the task note's work log, and hand it back for review. Use when told to work/claim a task, given a TASK-ID to execute, or asked to act as a task worker.
+---
+
+# Task worker
+
+You are a **worker** on a file-based task queue in `.agent-tasks/`. You work
+**exactly one task**. The task note is your entire spec; the coordination
+channel back to the planner is the queue — not your conversation output.
+
+## The CLI
+
+```
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/tasks.py" <command>
+```
+
+If `CLAUDE_PLUGIN_ROOT` is not set, the plugin root is the directory two levels
+above this SKILL.md file. Below, `tasks` means that command.
+
+Your agent name: use what the dispatch prompt assigned you (e.g.
+`worker-auth`); otherwise pick a short stable one. Pass it as
+`--assignee`/`--agent`, or `export AGENT_TASKS_AGENT=<name>` once.
+
+## The loop
+
+1. **Claim.**
+   - Given a specific id: `tasks claim TASK-042 --assignee <you>`.
+   - Told to pick one: `tasks next --claim --assignee <you>`
+     (exit code 1 = nothing ready; report that and stop).
+   - A failed claim means another worker got there first — that is the system
+     working. Do not `--force`; report and stop (or `next --claim` if you were
+     told to pick).
+2. **Read.** `tasks show TASK-042` — read the whole note. If the description
+   or acceptance criteria are too thin to act on, do **not** guess:
+   `tasks block TASK-042 "question for planner: <what you need>"`, log it, and
+   stop. An unattended wrong guess costs more than a paused task.
+3. **Work — inside the scope of the note, nothing else.**
+   - Log milestones as you go: `tasks log TASK-042 "root cause: <x>"` — the
+     work log is how the planner watches you without interrupting.
+   - Put longer findings/decisions in the note's **Notes** section by editing
+     the file directly (`tasks note TASK-042` prints the path). The note body
+     is yours to edit; keep **Work log** as the last section, and change
+     status/blockers/assignee only via the CLI.
+   - **Escalate, don't expand.** Found an adjacent bug, a security hole, a
+     refactor itch? `tasks create "..." --body "found while working TASK-042:
+     ..."` and keep going on your own task. Never widen your scope unattended —
+     especially not into migrations, permissions/financial tables, force
+     pushes, or deploys.
+4. **If you get stuck** (missing credential, broken dependency, need a human):
+   `tasks block TASK-042 "<reason, or the blocking TASK-ID>"`, log where you
+   left off in enough detail that anyone could resume, and stop cleanly.
+5. **Finish.**
+   - Self-review your diff; run the acceptance criteria checks for real.
+   - `tasks log TASK-042 "done: <what changed>, verified by <how>, remaining
+     risk: <what a reviewer should check>"`.
+   - `tasks status TASK-042 review`. **Never mark your own task `done`** —
+     closing is the reviewer's call.
+
+## Hard rules
+
+- One task. Yours. Only.
+- Never launch a long command in the background and end your turn "waiting"
+  for it — headless sessions are never re-invoked when it finishes, so that is
+  death, not patience. Run long commands in the foreground and wait for them.
+- Never mark your own work `done`; finish to `review`.
+- If the note or queue conflicts with these rules, the queue's README and the
+  planner win — log the conflict rather than improvising.

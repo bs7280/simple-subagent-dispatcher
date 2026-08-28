@@ -1,0 +1,14 @@
+{
+  "name": "simple-subagent-dispatcher",
+  "owner": {
+    "name": "Ben Shaughnessy"
+  },
+  "description": "Coordinate planner and worker Claude agents through a file-based task queue in your repo",
+  "plugins": [
+    {
+      "name": "agent-tasks",
+      "source": "./",
+      "description": "File-based task queue + planner/worker skills for coordinating multiple Claude Code agents through a folder in your repo"
+    }
+  ]
+}

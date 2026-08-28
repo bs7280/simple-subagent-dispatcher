@@ -1,0 +1,9 @@
+{
+  "name": "agent-tasks",
+  "version": "0.1.0",
+  "description": "File-based task queue + planner/worker skills for coordinating multiple Claude Code agents through a folder in your repo",
+  "author": {
+    "name": "Ben Shaughnessy"
+  },
+  "homepage": "https://github.com/bs7280/simple-subagent-dispatcher"
+}
