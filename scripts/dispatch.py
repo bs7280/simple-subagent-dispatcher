@@ -361,7 +361,12 @@ def write_prompt_file(root, name, prompt):
 def claude_cmd(cfg, args, base):
     model = getattr(args, "model", None) or cfg["model"]
     pm = getattr(args, "permission_mode", None) or cfg["permission_mode"]
-    bin_arg = getattr(args, "claude_bin", None) or cfg["claude_bin"]
+    # ladder: --claude-bin > AGENT_TASKS_CLAUDE_BIN > config.local.json >
+    # config.json > auto-resolution (which() + exe-unwrap). Config never
+    # replaces resolution: a configured NAME still resolves and unwraps.
+    bin_arg = (getattr(args, "claude_bin", None)
+               or os.environ.get("AGENT_TASKS_CLAUDE_BIN")
+               or cfg["claude_bin"])
     bin_argv, is_batch = resolve_claude_bin(
         list(bin_arg) if isinstance(bin_arg, list) else [bin_arg])
     via = cfg.get("prompt_via", "auto")

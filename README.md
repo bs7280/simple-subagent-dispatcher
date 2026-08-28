@@ -150,6 +150,24 @@ lacks:
 `WORKER` accepts a worker id, a unique prefix, or a task id (→ that task's
 latest worker).
 
+### Config: project file + machine overlay
+
+`.agent-tasks/config.json` is **project** config — committed and shared. A
+claude path is a **machine** fact, so there's a second layer:
+`.agent-tasks/config.local.json`, a gitignored overlay (init adds the
+gitignore entry) merged key-by-key over `config.json` — any key can be
+overridden there (`claude_bin`, `runner`, `model`, `worktree`, …). For the
+claude binary specifically the full ladder is:
+
+1. `--claude-bin` CLI flag
+2. `AGENT_TASKS_CLAUDE_BIN` env var
+3. `config.local.json`
+4. `config.json`
+5. auto-resolution (`shutil.which` + the batch-shim exe-unwrap)
+
+Config never replaces resolution: configuring the *name* `claude` still
+resolves to the shim and still gets the unwrap/stdin treatment.
+
 ### In-place vs. worktree — the project's call
 
 By default workers run **in the repo checkout**. `--worktree` gives each worker

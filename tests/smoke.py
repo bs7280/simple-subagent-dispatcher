@@ -506,10 +506,42 @@ def test_note_append(tmp):
         fail("empty append should fail")
 
 
+def test_config_overlay(tmp):
+    q = Queue(tmp)
+    out = q.out("init")
+    if "config.local.json" not in out:
+        fail("init should gitignore the local overlay")
+    gi = os.path.join(tmp, ".agent-tasks", ".gitignore")
+    with open(gi, encoding="utf-8") as f:
+        if f.read().count("config.local.json") != 1:
+            fail("gitignore entry missing")
+    q.run("init")  # idempotent: no duplicate line
+    with open(gi, encoding="utf-8") as f:
+        if f.read().count("config.local.json") != 1:
+            fail("re-init duplicated the gitignore entry")
+
+    # local overlay merges key-by-key over project config
+    with open(os.path.join(tmp, ".agent-tasks", "config.json"), "w",
+              encoding="utf-8") as f:
+        json.dump({"lease_minutes": 90, "model_tiers": ["haiku", "opus"]}, f)
+    with open(os.path.join(tmp, ".agent-tasks", "config.local.json"), "w",
+              encoding="utf-8") as f:
+        json.dump({"lease_minutes": 0.02}, f)  # local wins this key only
+    t = q.out("create", "Overlay probe").split()[1]
+    q.run("claim", t, "--assignee", "a")
+    time.sleep(2.5)
+    if not q.js("show", t, "--json")["lease_expired"]:
+        fail("local overlay lease_minutes should win over project config")
+    # untouched key still comes from project config
+    res = q.run("claim", t, "--tier", "sonnet", "--assignee", "b", check=False)
+    if res.returncode == 0 or "['haiku', 'opus']" not in res.stderr:
+        fail(f"project-config model_tiers should survive the overlay: {res.stderr}")
+
+
 def main():
     for test in (test_lifecycle, test_leases, test_tiers, test_resources,
                  test_doctor, test_mutex, test_concurrent_logs,
-                 test_utf8_discipline, test_note_append):
+                 test_utf8_discipline, test_note_append, test_config_overlay):
         tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
         try:
             test(tmp)

@@ -71,17 +71,22 @@ CONFIG_DEFAULTS = {
 
 
 def load_config(root):
+    """Defaults <- config.json (project, committed) <- config.local.json
+    (machine, gitignored). The local overlay merges key-by-key and may
+    override ANY config key -- machine facts (claude_bin, runner paths)
+    don't belong in shared project config."""
     cfg = dict(CONFIG_DEFAULTS)
-    path = os.path.join(root, "config.json")
-    if os.path.isfile(path):
-        try:
-            with open(path, encoding="utf-8") as f:
-                user = json.load(f)
-        except ValueError as e:
-            die(f"bad {path}: {e}")
-        for key in cfg:
-            if key in user:
-                cfg[key] = user[key]
+    for name in ("config.json", "config.local.json"):
+        path = os.path.join(root, name)
+        if os.path.isfile(path):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    user = json.load(f)
+            except ValueError as e:
+                die(f"bad {path}: {e}")
+            for key in cfg:
+                if key in user:
+                    cfg[key] = user[key]
     return cfg
 
 
@@ -415,6 +420,10 @@ Machine-managed task queue shared by planner and worker agents
   `allowed_tools` ([] -- extra permission rules for what your workers may run),
   `bootstrap` (".claude/task-worker-bootstrap.py" -- a Python script),
   `claude_bin` ("claude" -- string or argv list), `extra_args` ([]).
+- `config.local.json` -- optional machine-local overlay, merged key-by-key
+  over `config.json` (gitignored by init). Any key may be overridden; put
+  machine facts here (claude_bin path, runner), project policy in
+  config.json.
 - `runtime/` -- machine-local dispatcher state (worker registry, spawn logs);
   self-gitignored, never committed.
 
@@ -442,6 +451,17 @@ def cmd_init(args):
         with open(readme, "w", encoding="utf-8") as f:
             f.write(FOLDER_README.format(gh=args.github or "bs7280"))
         created.append("README.md")
+    gi = os.path.join(root, ".gitignore")
+    gi_text = ""
+    if os.path.exists(gi):
+        with open(gi, encoding="utf-8") as f:
+            gi_text = f.read()
+    if "config.local.json" not in gi_text:
+        with open(gi, "a", encoding="utf-8") as f:
+            if gi_text and not gi_text.endswith("\n"):
+                f.write("\n")
+            f.write("config.local.json\n")
+        created.append(".gitignore(config.local.json)")
     if created:
         print(f"initialized {root} ({', '.join(created)})")
     else:

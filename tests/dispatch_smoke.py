@@ -359,6 +359,36 @@ def run_all(tmp):
         fail(f"double-dispatch spawned {len(contested)} workers")
     disp("wait", tc, check=False)
 
+    # ---- claude_bin ladder: flag > env > local overlay > project config ----
+    local_cfg = os.path.join(repo, ".agent-tasks", "config.local.json")
+    set_cfg()  # rewrite project config...
+    with open(os.path.join(repo, ".agent-tasks", "config.json"), "r+",
+              encoding="utf-8") as f:
+        cfg_now = json.load(f)
+        cfg_now["claude_bin"] = "project-config-bogus-binary"
+        f.seek(0); f.truncate(); json.dump(cfg_now, f)
+    with open(local_cfg, "w", encoding="utf-8") as f:
+        json.dump({"claude_bin": [PY, stub], "model": "sonnet"}, f)
+    tl = tasksc("create", "Ladder task").stdout.split()[1]
+    wl = started_id(disp("start", tl))  # local overlay beats bogus project bin
+    time.sleep(1)
+    if "--model sonnet" not in log_text(wl):
+        fail("generic local-overlay key (model) should apply")
+    disp("wait", wl, check=False)
+
+    tl2 = tasksc("create", "Ladder env task").stdout.split()[1]
+    env_bak = dict(env)
+    env["AGENT_TASKS_CLAUDE_BIN"] = "env-var-bogus-binary"
+    res = disp("start", tl2, check=False)
+    if res.returncode == 0 or "env-var-bogus-binary" not in res.stderr:
+        fail(f"env var should outrank the local overlay: {res.stderr}")
+    res = disp("start", tl2, "--claude-bin", "flag-bogus-binary", check=False)
+    if res.returncode == 0 or "flag-bogus-binary" not in res.stderr:
+        fail(f"--claude-bin flag should outrank the env var: {res.stderr}")
+    env.clear(); env.update(env_bak)
+    os.remove(local_cfg)
+    set_cfg()
+
     # ---- unresolvable claude binary: clear error, pre-claim reverted ----
     tb = tasksc("create", "Binary-less task").stdout.split()[1]
     res = disp("start", tb, "--claude-bin", "definitely-not-a-real-binary-xyz",
