@@ -195,16 +195,43 @@ project's default in **`.agent-tasks/config.json`** (all keys optional):
   worktree mode the worktree's own checked-out copy of `.agent-tasks/` is never
   written to.
 
-### Dispatch pre-claims; workers verify
+### Dispatch pre-claims; the worker never touches the queue
 
 `start` claims the task (assignee = the worker id it mints) **before** spawning
 — atomically, under the queue lock. Of two concurrent dispatches of the same
 task, the loser exits immediately with the holder named, instead of burning a
-whole session to discover its claim fails. The worker prompt tells the worker
-the task is pre-claimed: it verifies the assignment, heartbeats during long
-steps, and never claims. If worktree setup or the spawn itself fails, the
-pre-claim is reverted to `open`. Worker-side self-claim still works for
-humans and external agents using the task-worker skill.
+whole session to discover its claim fails. If worktree setup or the spawn
+itself fails, the pre-claim is reverted to `open`. Worker-side self-claim
+still works for humans and external agents using the task-worker skill.
+
+### The outbox: reporting with the grain of the model
+
+Live dogfooding taught the defining lesson: a cheap worker model **ignored the
+CLI entirely**, hand-edited the task note with its native file tools, and
+reported success — because small models are heavily trained on read/write/edit
+file operations and reliably fumble custom CLI invocations that replace them.
+So dispatched workers don't get a CLI contract at all:
+
+- Each worker gets a **per-worker outbox** (`.agent-tasks/runtime/outbox/
+  <worker-id>.md`, also exported as `AGENT_TASKS_OUTBOX`): one writer, ordinary
+  file tools, plain markdown. Progress, findings, escalations — all prose.
+- The worker signals its terminal state with one sentinel line: `STATUS:
+  review` or `STATUS: blocked: <reason>`. Tiny, forgiving grammar — one token,
+  last occurrence wins, case-insensitive. Nothing else to get wrong.
+- When the dispatcher observes the exit (`wait`, `watch`, or `list`), it
+  **folds** the outbox into the task note's work log under the queue lock,
+  validates the sentinel (workers can only reach `review` or `blocked` —
+  `done` stays reviewer-only; a stolen task's stale sentinel is ignored), and
+  applies it through the same primitives the CLI uses. `blocked: <reason>`
+  reopens the task with the reason recorded as a blocker. Folding archives the
+  outbox to `<worker-id>.folded.md` in the same locked span, so a crashed fold
+  can never double-append. No sentinel = the existing died-mid-task handling.
+- `wait`/`watch` **auto-heartbeat** while the worker's pid is verifiably
+  alive, so dispatched workers carry no heartbeat duty (the CLI `heartbeat`
+  remains the backstop for externally-run agents).
+
+Net: a dispatched worker needs **zero queue-CLI calls** — task work, outbox
+writes, one sentinel line.
 
 ### The worker prompt bans the known death mode
 
@@ -230,9 +257,10 @@ when it (or anything else) kills a worker anyway.
   stays until explicitly removed — and doubles as a question channel back to
   the planner. `next`/`claim` refuse blocked tasks.
 - **Claims are leases, not locks.** `claim` stamps `claimed_at` +
-  `lease_until` (config `lease_minutes`, default 90). Workers `heartbeat`
-  during long steps; if a worker crashes, its lease simply expires and the
-  task becomes claimable again — `next`/`claim` steal it and record the steal
+  `lease_until` (config `lease_minutes`, default 90). Dispatched workers are
+  auto-heartbeated by their supervisor (`wait`/`watch`); direct/external
+  agents `heartbeat` themselves during long steps. If a worker crashes, its
+  lease simply expires and the task becomes claimable again — `next`/`claim` steal it and record the steal
   (old assignee, expiry time) in the work log. `board` shows expired-lease
   tasks in their own bucket. No human unsticking required.
 - **Resources are mutexes, blockers are ordering.** `--resources db,browser`

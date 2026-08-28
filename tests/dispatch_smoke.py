@@ -20,13 +20,30 @@ PY = sys.executable
 
 FAKE_CLAUDE = """\
 import os, sys, time
+mode = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "plain"
 print("FAKE-CLAUDE ARGS:", " ".join(sys.argv[1:]))
 print("FAKE-CLAUDE AGENT_TASKS_DIR:", os.environ.get("AGENT_TASKS_DIR", "unset"))
 print("FAKE-CLAUDE AGENT:", os.environ.get("AGENT_TASKS_AGENT", "unset"))
 print("FAKE-CLAUDE CWD:", os.path.realpath(os.getcwd()))
 print("FAKE-CLAUDE CLAUDECODE:", os.environ.get("CLAUDECODE", "unset"))
 sys.stdout.flush()
-time.sleep(3)
+ob = os.environ.get("AGENT_TASKS_OUTBOX")
+
+def write(text):
+    with open(ob, "a", encoding="utf-8") as f:
+        f.write(text)
+
+if mode == "review":
+    write("did the thing\\nverified: checks pass\\nSTATUS: review\\n")
+    time.sleep(0.2)
+elif mode == "blocked":
+    write("half done\\nstatus: blocked: need API key\\n")
+    time.sleep(0.2)
+elif mode == "sleepy":
+    time.sleep(5)
+    write("slow but done\\nSTATUS: review\\n")
+else:
+    time.sleep(3)
 """
 
 
@@ -81,15 +98,27 @@ def run_all(tmp):
         fail("default runner missing from composed prompt")
     if "NEVER launch a long-running command" not in out:
         fail("prompt missing death-mode ban")
-    if "already claimed for you" not in out or f"show {t1}" not in out:
-        fail("prompt should teach verify-preclaim, not self-claim")
+    if "already claimed for you" not in out:
+        fail("prompt should say the task is pre-claimed")
+    if "STATUS: review" not in out or "STATUS: blocked:" not in out:
+        fail("prompt missing the sentinel grammar")
+    if os.path.join("runtime", "outbox") not in out:
+        fail("prompt should name the outbox file")
 
     # stub claude; runner pinned to this interpreter so the test needs no uv
     stub = os.path.join(tmp, "fake_claude.py")
-    with open(stub, "w") as f:
+    with open(stub, "w", encoding="utf-8") as f:
         f.write(FAKE_CLAUDE)
-    with open(os.path.join(repo, ".agent-tasks", "config.json"), "w") as f:
-        json.dump({"claude_bin": [PY, stub], "model": "haiku", "runner": [PY]}, f)
+
+    def set_cfg(mode=None, **kw):
+        bin_argv = [PY, stub] + ([mode] if mode else [])
+        cfg = {"claude_bin": bin_argv, "model": "haiku", "runner": [PY]}
+        cfg.update(kw)
+        with open(os.path.join(repo, ".agent-tasks", "config.json"), "w",
+                  encoding="utf-8") as f:
+            json.dump(cfg, f)
+
+    set_cfg()
 
     # ---- start in-place (default) ----
     wid = started_id(disp("start", t1))
@@ -98,6 +127,9 @@ def run_all(tmp):
         fail(f"start should pre-claim for the minted worker: {t}")
     if "running" not in list_row(wid):
         fail("worker not listed running")
+    ob1 = os.path.join(repo, ".agent-tasks", "runtime", "outbox", f"{wid}.md")
+    if not os.path.isfile(ob1):
+        fail("outbox not created at spawn")
     with open(os.path.join(repo, ".agent-tasks", "tasks", f"{t1}.md")) as f:
         if f"dispatched worker {wid}" not in f.read():
             fail("dispatch not logged to task note")
@@ -111,6 +143,7 @@ def run_all(tmp):
         ("--permission-mode acceptEdits", "permission-mode not passed"),
         ("--model haiku", "config model not passed"),
         ("tasks.py:*)", "queue CLI not allowlisted"),
+        ("--add-dir", "queue folder not added as a working directory"),
         ("FAKE-CLAUDE AGENT_TASKS_DIR: " + queue_root, "AGENT_TASKS_DIR not exported"),
         ("FAKE-CLAUDE CWD: " + os.path.realpath(repo), "in-place worker not in repo checkout"),
         ("FAKE-CLAUDE CLAUDECODE: unset", "parent CLAUDE_* env leaked into worker"),
@@ -137,6 +170,8 @@ def run_all(tmp):
         fail(f"resume count: {w['resumes']}")
     if f"--resume {w['session_id']}" not in log_text(wid):
         fail("resume used wrong session id")
+    if not os.path.isfile(ob1):
+        fail("resume should recreate the outbox (folded away on exit)")
 
     if f"stopped {wid}" not in disp("stop", wid).stdout:
         fail("stop output")
@@ -154,6 +189,63 @@ def run_all(tmp):
     # worker resolution by task id and by unique prefix
     disp("wait", t1, check=False)
     disp("wait", wid[:12], check=False)
+
+    # ---- outbox sentinel: review (folded via `list`) ----
+    set_cfg("review")
+    tr = tasksc("create", "Sentinel review task").stdout.split()[1]
+    wr = started_id(disp("start", tr))
+    time.sleep(1.5)  # stub writes sentinel and exits almost immediately
+    disp("list")     # any observation of an exited worker folds its outbox
+    t = json.loads(tasksc("show", tr, "--json").stdout)
+    if t["status"] != "review":
+        fail(f"review sentinel should move the task to review: {t}")
+    note_file = os.path.join(repo, ".agent-tasks", "tasks", f"{tr}.md")
+    with open(note_file, encoding="utf-8") as f:
+        note = f.read()
+    if "did the thing" not in note or f"outbox of {wr} folded:" not in note:
+        fail(f"outbox content not folded into note:\n{note}")
+    if "-> review (outbox sentinel)" not in note:
+        fail("sentinel transition not logged")
+    obr = os.path.join(repo, ".agent-tasks", "runtime", "outbox", f"{wr}.md")
+    if os.path.isfile(obr) or not os.path.isfile(obr[:-3] + ".folded.md"):
+        fail("outbox should be archived to .folded.md in the fold")
+    disp("list")  # idempotence: a second observation must not double-append
+    disp("wait", wr, check=False)
+    with open(note_file, encoding="utf-8") as f:
+        if f.read().count("did the thing") != 1:
+            fail("fold is not idempotent")
+
+    # ---- outbox sentinel: blocked (folded via `wait`) ----
+    set_cfg("blocked")
+    tbk = tasksc("create", "Sentinel blocked task").stdout.split()[1]
+    wb = started_id(disp("start", tbk))
+    res = disp("wait", wb, check=False)
+    if res.returncode != 0:
+        fail(f"blocked sentinel wait rc={res.returncode}, want 0 (not mid-task)")
+    if "outbox folded: blocked: need API key" not in res.stdout:
+        fail(f"wait should report the fold: {res.stdout}")
+    t = json.loads(tasksc("show", tbk, "--json").stdout)
+    if t["status"] != "open" or "need API key" not in t["blockers"]:
+        fail(f"blocked sentinel should reopen with the blocker recorded: {t}")
+
+    # ---- auto-heartbeat: supervisor keeps a live worker's lease fresh ----
+    set_cfg("sleepy", lease_minutes=0.02)  # 1.2s lease vs a 5s worker
+    th = tasksc("create", "Slow heartbeat task").stdout.split()[1]
+    wh = started_id(disp("start", th))
+    waiter = subprocess.Popen([PY, DISPATCH, "wait", wh], cwd=repo, env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True)
+    time.sleep(3)  # without auto-heartbeat the lease is long expired by now
+    steal = sh([PY, TASKS, "claim", th, "--assignee", "rival"], check=False)
+    if steal.returncode == 0:
+        fail("auto-heartbeat failed: a rival stole a live worker's lease")
+    waiter.communicate(timeout=30)
+    if waiter.returncode != 0:
+        fail(f"sleepy worker wait rc={waiter.returncode}")
+    t = json.loads(tasksc("show", th, "--json").stdout)
+    if t["status"] != "review":
+        fail(f"sleepy worker should end in review: {t}")
+    set_cfg()  # back to plain defaults
 
     # ---- task-pinned model beats config model ----
     tm = tasksc("create", "Sonnet-pinned task", "--model", "sonnet").stdout.split()[1]

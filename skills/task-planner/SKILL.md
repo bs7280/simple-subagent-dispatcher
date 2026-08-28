@@ -119,6 +119,12 @@ duplicating work.
 ## 4. Monitor
 
 - `tasks board` — one-screen overview (statuses, assignees, blockers).
+- Dispatched workers report through per-worker **outboxes** that the
+  dispatcher folds into the task note when it observes the exit (`wait`,
+  `watch`, or `list`) — ending with `STATUS: review` or `STATUS: blocked:
+  <reason>` (blocked reopens the task with the reason as a blocker, i.e. a
+  question addressed to you). `wait`/`watch` also auto-heartbeat live
+  workers, so a running worker's lease never decays under supervision.
 - `tasks list --status in_progress` / `tasks show TASK-042` — the note's Work
   log is the worker's live narration; read it before assuming a worker is stuck.
 - `tasks doctor` — periodic integrity check: index/note drift, orphan

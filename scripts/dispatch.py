@@ -60,6 +60,7 @@ def repo_of(root):
 def ensure_runtime(root):
     rt = os.path.join(root, RUNTIME)
     os.makedirs(os.path.join(rt, "logs"), exist_ok=True)
+    os.makedirs(os.path.join(rt, "outbox"), exist_ok=True)
     gi = os.path.join(rt, ".gitignore")
     if not os.path.exists(gi):
         with open(gi, "w", encoding="utf-8") as f:
@@ -119,6 +120,10 @@ def resolve_worker(root, workers, raw):
     tasks.die(f"no worker matching '{raw}' (see `list`)")
 
 
+def outbox_path(root, wid):
+    return os.path.join(root, RUNTIME, "outbox", f"{wid}.md")
+
+
 def cli_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks.py")
 
@@ -130,78 +135,166 @@ def find_transcript(session_id):
 
 # ---------------------------------------------------------------- prompts
 
-WORKER_PROMPT = """You are an unattended task worker executing exactly one task from a file-based queue.
+WORKER_PROMPT = """You are an unattended task worker executing exactly one task.
 
-Queue CLI (run via Bash): {run} "{cli}"
-The queue lives at {root} -- AGENT_TASKS_DIR is set in your environment, so the
-CLI resolves to that one shared queue from anywhere, including git worktrees.
-Your task: {tid}
-Your agent/assignee name: {agent}
+Your task: {tid}. The full spec is the task note at:
+  {note}
+Read it first -- it is your entire spec. The task is already claimed for you
+(assignee: {agent}), and your supervisor keeps the claim alive while you run.
+You do not need to run any queue commands.
 
-Do this, in order:
-1. The task is already claimed for you -- the dispatcher pre-claimed it
-   (assignee: {agent}) before spawning you. Verify and read it:
-   {run} "{cli}" show {tid}
-   If the assignee shown is not {agent}, someone else owns the task now:
-   print that and stop immediately. Never claim it yourself, never --force.
-2. The note from step 1 is your entire spec. If it is too vague to act on, run
-   {run} "{cli}" block {tid} "question for planner: <what you need>" --agent {agent}
-   and stop -- an unattended wrong guess costs more than a paused task.
-3. Do the work, staying strictly inside the note's scope.
-   - Your claim is a lease, not a lock. During long steps, extend it:
-     {run} "{cli}" heartbeat {tid} --assignee {agent}
-     (at least once per half lease). If a heartbeat fails because the task is
-     assigned to someone else, your expired claim was stolen: stop immediately.
-   - Log milestones as you go: {run} "{cli}" log {tid} "<update>" --agent {agent}
-   - Longer findings go in the note's Notes section (edit the file directly;
-     keep Work log as the last section).
-   - Out-of-scope discoveries (adjacent bugs, refactor itches): create a new
-     task ("found while working {tid}: ...") instead of expanding yours.
-   - If stuck (missing credential, broken dependency, need a human): block the
-     task with the reason, log where you left off in enough detail that anyone
-     could resume, and stop cleanly.
-4. Finish: self-review your changes and actually run the acceptance checks, then
-   {run} "{cli}" log {tid} "done: <what changed>; verified: <how>; reviewer should check: <what>" --agent {agent}
-   {run} "{cli}" status {tid} review --agent {agent}
-   Never mark the task done -- closing is the reviewer's call, not yours.
+YOUR OUTBOX -- the one file you report through:
+  {outbox}
+Write progress notes, findings, and decisions there as you go, as plain
+markdown, with your ordinary file tools. It is yours alone -- nobody else
+writes to it -- and it is folded into the task note for you afterwards.
 
-Hard rules:
+Queue state is read-only to you: never edit the task note, index.json, or
+anything else under {root}. Your outbox is the sanctioned place to write.
+
+When you finish, the LAST line of your outbox must be exactly one of:
+  STATUS: review
+  STATUS: blocked: <what you need>
+Use review only after actually running the note's acceptance checks; record
+in the outbox what changed, how you verified it, and what a reviewer should
+double-check. Use blocked when you cannot proceed (missing credential, broken
+dependency, spec too vague to act on) -- say what you need and stop cleanly.
+Those are the only two endings; done is the reviewer's call, never yours.
+
+Rules:
+- Stay strictly inside the note's scope. Found an adjacent bug or a refactor
+  itch? Describe it in your outbox for the planner instead of fixing it.
 - NEVER launch a long-running command in the background and end your turn
   "waiting" for it. Headless sessions are not re-invoked when background work
-  finishes -- that is death, not patience. Run long commands in the foreground.
+  finishes -- run long commands in the foreground.
 - Never touch DB migrations, permissions/financial data, force pushes, or
   deploys unless the task note explicitly says to.
-- If you commit in a shared checkout (you were not given a dedicated
-  worktree): first {run} "{cli}" lock commit --agent {agent}
-  (exit code 4 = busy: wait ~30s and retry a few times). Stage ONLY the files
-  you changed, by name -- never git add -A / -u / commit -a, which would sweep
-  up other workers' half-done edits. Commit, then
-  {run} "{cli}" unlock commit --agent {agent}
-- If the agent-tasks plugin's task-worker skill is available, it restates
-  these rules; follow it.{extra}"""
+- Only if the note tells you to commit and you share the checkout with other
+  workers (no dedicated worktree): wrap the stage->commit span in
+  {run} "{cli}" lock commit --agent {agent}  ...  {run} "{cli}" unlock commit --agent {agent}
+  and stage only the files you changed, by name -- never git add -A / -u /
+  commit -a.{extra}"""
 
 CONTINUATION_PROMPT = """You are resuming an interrupted unattended task-worker session for {tid}.
-Your claim may have lease-expired while you were down -- immediately run
-{run} "{cli}" heartbeat {tid} --assignee {agent}
-If it fails because the task is assigned to someone else, your expired claim
-was stolen: print that and stop. Otherwise re-read your task
-({run} "{cli}" show {tid}) and your own Work log entries, and check the
-working directory state (git status, git diff) to see what you had already
-done. Then continue exactly where you left off and finish
-per your original instructions: log milestones, never launch a background
-command and end your turn waiting for it, and finish with a completion summary
-and status "review" (never "done")."""
+Re-read the task note ({note}) -- any earlier outbox content of yours was
+already folded into its Work log -- and your outbox ({outbox}). Check the
+working tree state (git status, git diff), then continue exactly where you
+left off, per your original instructions: progress goes in your outbox, and
+its LAST line must end up as the STATUS sentinel (STATUS: review, or
+STATUS: blocked: <what you need>). The task remains claimed for you; your
+supervisor keeps the claim alive."""
 
 
-def build_prompt(root, tid, agent, extra, cfg):
+def build_prompt(root, tid, agent, extra, cfg, outbox):
     extra = f"\n\nAdditional instructions from the dispatcher:\n{extra}" if extra else ""
     return WORKER_PROMPT.format(cli=cli_path(), root=root, tid=tid, agent=agent,
+                                note=tasks.note_path(root, tid), outbox=outbox,
                                 run=runner_str(cfg), extra=extra)
+
+
+SENTINEL = re.compile(r"^\s*status\s*:\s*(review|blocked)\b[:\s]*(.*?)\s*$", re.I)
+
+
+def parse_sentinel(text):
+    """Tiny, forgiving grammar: one token, LAST occurrence wins,
+    case-insensitive; everything else in the outbox is prose."""
+    last = None
+    for line in text.splitlines():
+        m = SENTINEL.match(line)
+        if m:
+            last = (m.group(1).lower(), m.group(2).strip())
+    return last
+
+
+def fold_outbox(root, wid, w):
+    """Fold a finished worker's outbox into the canonical task note under the
+    queue lock, apply its sentinel through the same primitives the CLI uses,
+    and archive the outbox in the same locked span (idempotence: a crashed
+    fold can never double-append). Returns a summary string, or None if there
+    was nothing to fold."""
+    outbox = w.get("outbox") or outbox_path(root, wid)
+    if not os.path.isfile(outbox):
+        return None
+    with tasks.Lock(root):
+        if not os.path.isfile(outbox):
+            return None  # another observer folded it while we waited
+        with open(procs.long_path(outbox), encoding="utf-8") as f:
+            text = f.read()
+        tid = w["task"]
+        body = text.strip()
+        if body and os.path.isfile(tasks.note_path(root, tid)):
+            tasks.append_log(root, tid, "dispatcher", f"outbox of {wid} folded:")
+            with open(procs.long_path(tasks.note_path(root, tid)), "a",
+                      encoding="utf-8") as f:
+                for line in body.splitlines():
+                    f.write(f"    {line}\n")
+        applied = "no sentinel"
+        sentinel = parse_sentinel(text)
+        index = tasks.load_index(root)
+        task = index["tasks"].get(tid)
+        if sentinel and task:
+            kind, reason = sentinel
+            if task.get("assignee") != w["agent"] or task["status"] != "in_progress":
+                applied = (f"sentinel '{kind}' ignored: task is now "
+                           f"{task['status']} (assignee {task.get('assignee')})")
+                tasks.append_log(root, tid, "dispatcher", applied)
+            elif kind == "review":
+                task["status"] = "review"
+                task.pop("lease_until", None)
+                task["updated"] = tasks.now()
+                tasks.save_index(root, index)
+                tasks.set_note_status(root, tid, "review")
+                tasks.append_log(root, tid, w["agent"],
+                                 "status: in_progress -> review (outbox sentinel)")
+                applied = "review"
+            else:
+                reason = reason or f"worker {wid} reported blocked without a reason"
+                if reason not in task["blockers"]:
+                    task["blockers"].append(reason)
+                task["status"] = "open"
+                task.pop("lease_until", None)
+                task["updated"] = tasks.now()
+                tasks.save_index(root, index)
+                tasks.set_note_status(root, tid, "open")
+                tasks.append_log(root, tid, w["agent"],
+                                 f"blocked (outbox sentinel): {reason} -- back to open")
+                applied = f"blocked: {reason}"
+        os.replace(procs.long_path(outbox),
+                   procs.long_path(outbox[:-3] + ".folded.md"))
+    return applied
+
+
+def maybe_fold(root, workers, wid):
+    """Fold an exited worker's outbox, if it has one waiting."""
+    w = workers[wid]
+    if worker_state(w) == "running":
+        return None
+    return fold_outbox(root, wid, w)
+
+
+def auto_heartbeat(root, w, cfg):
+    """The dispatcher keeps a verifiably-alive worker's lease fresh, so
+    dispatched workers carry no heartbeat duty (cheap models forget it;
+    supervisors don't). Worker-side heartbeat remains the backstop for
+    externally-run agents."""
+    with tasks.Lock(root):
+        index = tasks.load_index(root)
+        task = index["tasks"].get(w["task"])
+        if (task and task["status"] == "in_progress"
+                and task.get("assignee") == w["agent"]):
+            task["lease_until"] = tasks.compute_lease(cfg)
+            task["updated"] = tasks.now()
+            tasks.save_index(root, index)
+
+
+def heartbeat_interval(cfg):
+    """Half the lease, clamped to [1s, 60s]."""
+    return max(1.0, min(60.0, float(cfg["lease_minutes"]) * 30.0))
 
 
 # ---------------------------------------------------------------- spawn
 
-def spawn(root, workdir, cmd, log_path, agent):
+def spawn(root, workdir, cmd, log_path, agent, outbox=None):
     # Strip the parent session's CLAUDE_* env (CLAUDECODE, session id, child-
     # session marker, messaging socket, ...): a spawned worker that inherits it
     # is treated as a nested child session and loses the ability to self-approve
@@ -212,6 +305,8 @@ def spawn(root, workdir, cmd, log_path, agent):
            or not (k == "CLAUDECODE" or k.startswith("CLAUDE_"))}
     env["AGENT_TASKS_DIR"] = root       # one shared queue, even from worktrees
     env["AGENT_TASKS_AGENT"] = agent
+    if outbox:
+        env["AGENT_TASKS_OUTBOX"] = outbox
     with open(procs.long_path(log_path), "ab") as logf:
         logf.write((f"\n=== {tasks.now()} spawn: " + " ".join(cmd[:-1])
                     + " <prompt>\n").encode())
@@ -244,6 +339,9 @@ def claude_cmd(cfg, args, base):
     rules = [f'Bash({run} "{cli}":*)', f"Bash({run} {cli}:*)"]
     rules += list(cfg["allowed_tools"])
     cmd += ["--allowedTools", " ".join(rules)]
+    # the queue folder is an additional working directory so the worker's
+    # ordinary file tools can write its outbox even from a worktree
+    cmd += ["--add-dir", cfg["_root"]]
     if model:
         cmd += ["--model", model]
     cmd += list(cfg["extra_args"])
@@ -313,13 +411,17 @@ def cmd_start(args):
 
         if not args.model and task.get("model"):
             args.model = task["model"]  # task > config > claude CLI default
-        prompt = build_prompt(root, tid, agent, args.prompt_extra, cfg)
+        rt = ensure_runtime(root)
+        outbox = outbox_path(root, worker_id)
+        with open(procs.long_path(outbox), "w", encoding="utf-8") as f:
+            f.write("")  # exists from birth; exactly one writer: the worker
+        prompt = build_prompt(root, tid, agent, args.prompt_extra, cfg, outbox)
+        cfg["_root"] = root
         cmd, model, pm = claude_cmd(cfg, args, ["--session-id", session_id])
         cmd.append(prompt)
 
-        rt = ensure_runtime(root)
         log_path = os.path.join(rt, "logs", f"{worker_id}.out")
-        proc = spawn(root, workdir, cmd, log_path, agent)
+        proc = spawn(root, workdir, cmd, log_path, agent, outbox=outbox)
     except (Exception, SystemExit):
         _revert_preclaim(root, tid, agent)
         raise
@@ -327,7 +429,7 @@ def cmd_start(args):
     entry = {"task": tid, "session_id": session_id, "pid": proc.pid,
              "cwd": workdir, "worktree_branch": branch, "model": model,
              "permission_mode": pm, "agent": agent, "started": tasks.now(),
-             "resumes": 0}
+             "outbox": outbox, "resumes": 0}
     with tasks.Lock(root):
         workers = load_workers(root)
         workers[worker_id] = entry
@@ -358,6 +460,8 @@ def needs_resume(index, workers, wid):
 def cmd_list(args):
     root = tasks.find_dir()
     workers = load_workers(root)
+    for wid in list(workers):
+        maybe_fold(root, workers, wid)
     index = tasks.load_index(root)
     if args.json:
         out = []
@@ -426,6 +530,8 @@ def cmd_watch(args):
     workers = load_workers(root)
     wid = resolve_worker(root, workers, args.worker)
     w = workers[wid]
+    cfg = load_config(root)
+    maybe_fold(root, workers, wid)
     path = find_transcript(w["session_id"])
     if path:
         parse = parse_line
@@ -449,6 +555,7 @@ def cmd_watch(args):
         if not args.follow:
             return
         buf = ""
+        hb_every, last_hb = heartbeat_interval(cfg), 0.0
         while True:
             chunk = f.readline()
             if chunk:
@@ -459,22 +566,35 @@ def cmd_watch(args):
                     buf = ""
                 continue
             if not pid_alive(w["pid"]):
-                print(f"[worker {wid} exited]")
+                folded = maybe_fold(root, workers, wid)
+                print(f"[worker {wid} exited"
+                      + (f"; outbox folded: {folded}]" if folded else "]"))
                 return
+            if time.time() - last_hb >= hb_every:
+                auto_heartbeat(root, w, cfg)
+                last_hb = time.time()
             time.sleep(0.5)
 
 
 def cmd_wait(args):
     root = tasks.find_dir()
+    cfg = load_config(root)
     workers = load_workers(root)
     wid = resolve_worker(root, workers, args.worker)
     w = workers[wid]
     deadline = time.time() + args.timeout if args.timeout else None
+    hb_every, last_hb = heartbeat_interval(cfg), 0.0
     while pid_alive(w["pid"]):
         if deadline and time.time() > deadline:
             print(f"timeout: {wid} still running (pid {w['pid']})")
             sys.exit(2)
+        if time.time() - last_hb >= hb_every:
+            auto_heartbeat(root, w, cfg)
+            last_hb = time.time()
         time.sleep(1)
+    folded = maybe_fold(root, workers, wid)
+    if folded:
+        print(f"outbox folded: {folded}")
     status = tasks.load_index(root)["tasks"].get(w["task"], {}).get("status", "?")
     print(f"{wid} exited; {w['task']} status: {status}")
     if status == "in_progress":
@@ -495,12 +615,18 @@ def cmd_resume(args):
         tasks.die(f"worker cwd is gone: {w['cwd']}")
     if not args.model and w.get("model"):
         args.model = w["model"]  # resume with the model the worker started on
+    outbox = w.get("outbox") or outbox_path(root, wid)
+    ensure_runtime(root)
+    if not os.path.isfile(outbox):
+        with open(procs.long_path(outbox), "w", encoding="utf-8") as f:
+            f.write("")  # earlier content was folded into the note on exit
     prompt = args.prompt or CONTINUATION_PROMPT.format(
-        cli=cli_path(), tid=w["task"], run=runner_str(cfg), agent=w["agent"])
+        tid=w["task"], note=tasks.note_path(root, w["task"]), outbox=outbox)
+    cfg["_root"] = root
     cmd, model, pm = claude_cmd(cfg, args, ["--resume", w["session_id"]])
     cmd.append(prompt)
     log_path = os.path.join(ensure_runtime(root), "logs", f"{wid}.out")
-    proc = spawn(root, w["cwd"], cmd, log_path, w["agent"])
+    proc = spawn(root, w["cwd"], cmd, log_path, w["agent"], outbox=outbox)
     with tasks.Lock(root):
         workers = load_workers(root)
         workers[wid].update(pid=proc.pid, resumes=workers[wid].get("resumes", 0) + 1,
@@ -532,7 +658,8 @@ def cmd_prompt(args):
     index = tasks.load_index(root)
     tid = tasks.resolve_id(index, args.task)
     print(build_prompt(root, tid, args.agent_name or "<worker-name>",
-                       args.prompt_extra, cfg))
+                       args.prompt_extra, cfg,
+                       outbox_path(root, "<worker-id>")))
 
 
 # ---------------------------------------------------------------- cli

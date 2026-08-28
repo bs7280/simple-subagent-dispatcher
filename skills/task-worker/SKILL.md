@@ -24,6 +24,20 @@ Your agent name: use what the dispatch prompt assigned you (e.g.
 `worker-auth`); otherwise pick a short stable one. Pass it as
 `--assignee`/`--agent`, or `export AGENT_TASKS_AGENT=<name>` once.
 
+## Dispatched with an outbox? (most workers)
+
+If your spawn prompt names an **outbox file** (under
+`.agent-tasks/runtime/outbox/`), that prompt is your contract and you need
+**zero queue-CLI calls**: the task is pre-claimed for you, a supervisor keeps
+the lease alive, and everything you'd normally log or update goes into the
+outbox **with your ordinary file tools** — progress notes, findings,
+decisions, escalations, all plain markdown. Queue files (the task note,
+`index.json`) are read-only to you. Finish by making the LAST line of the
+outbox exactly `STATUS: review` (after really running the acceptance checks)
+or `STATUS: blocked: <what you need>`. The dispatcher folds your outbox into
+the task note and applies the status for you. The rest of this skill is for
+agents working the queue **directly** (self-claimed, no dispatcher).
+
 ## The loop
 
 1. **Claim.**
