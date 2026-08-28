@@ -93,6 +93,19 @@
       "created": "2026-08-28T20:19:18Z",
       "updated": "2026-08-28T20:19:18Z",
       "note": "tasks/TASK-007.md"
+    },
+    "TASK-008": {
+      "title": "Don't pre-create the outbox file",
+      "status": "open",
+      "priority": "low",
+      "assignee": null,
+      "blockers": [],
+      "tags": [
+        "dispatcher"
+      ],
+      "created": "2026-08-28T21:12:12Z",
+      "updated": "2026-08-28T21:12:12Z",
+      "note": "tasks/TASK-008.md"
     }
   }
 }
