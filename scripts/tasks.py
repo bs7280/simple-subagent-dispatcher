@@ -812,9 +812,10 @@ def _note_frontmatter_status(root, tid):
     return (m.group(1).strip() if m else None), True
 
 
-def cmd_doctor(args):
-    """Integrity report: index vs notes drift, orphan claims, strays."""
-    root = find_dir()
+def doctor_findings(root, fix=False):
+    """Integrity findings: index vs notes drift, orphan claims, strays.
+    Returns (findings, fixed_count). Used by cmd_doctor and by the
+    dispatcher, which runs it automatically on worker exit."""
     index = load_index(root)
     findings = []
     fixed = 0
@@ -827,7 +828,7 @@ def cmd_doctor(args):
         if note_status is not None and note_status != task["status"]:
             findings.append(f"{tid}: status drift -- index '{task['status']}' vs "
                             f"note frontmatter '{note_status}' (index wins)")
-            if args.fix:
+            if fix:
                 with Lock(root):
                     set_note_status(root, tid, task["status"])
                 fixed += 1
@@ -861,7 +862,12 @@ def cmd_doctor(args):
             findings.append(f"{tid}: orphan claim -- assignee {task['assignee']}, "
                             f"lease expired {task['lease_until']}, no live worker "
                             f"(claimable; next/claim will steal it)")
+    return findings, fixed
 
+
+def cmd_doctor(args):
+    root = find_dir()
+    findings, fixed = doctor_findings(root, fix=args.fix)
     for finding in findings:
         print(finding)
     if args.fix and fixed:

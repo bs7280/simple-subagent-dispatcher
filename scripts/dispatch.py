@@ -272,6 +272,15 @@ def maybe_fold(root, workers, wid):
     return fold_outbox(root, wid, w)
 
 
+def report_doctor(root):
+    """Auto-doctor on worker exit: drift/orphan detection happens in the
+    loop, not when a human remembers. Reported only -- callers keep their
+    own exit-code contracts."""
+    findings, _ = tasks.doctor_findings(root)
+    for finding in findings:
+        print(f"doctor: {finding}")
+
+
 def auto_heartbeat(root, w, cfg):
     """The dispatcher keeps a verifiably-alive worker's lease fresh, so
     dispatched workers carry no heartbeat duty (cheap models forget it;
@@ -578,6 +587,7 @@ def cmd_watch(args):
                 folded = maybe_fold(root, workers, wid)
                 print(f"[worker {wid} exited"
                       + (f"; outbox folded: {folded}]" if folded else "]"))
+                report_doctor(root)
                 return
             if time.time() - last_hb >= hb_every:
                 auto_heartbeat(root, w, cfg)
@@ -604,6 +614,7 @@ def cmd_wait(args):
     folded = maybe_fold(root, workers, wid)
     if folded:
         print(f"outbox folded: {folded}")
+    report_doctor(root)
     status = tasks.load_index(root)["tasks"].get(w["task"], {}).get("status", "?")
     print(f"{wid} exited; {w['task']} status: {status}")
     if status == "in_progress":

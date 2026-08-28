@@ -198,6 +198,22 @@ def run_all(tmp):
     disp("wait", t1, check=False)
     disp("wait", wid[:12], check=False)
 
+    # ---- auto-doctor on exit: hand-edited note surfaces in wait ----
+    td = tasksc("create", "Doctor bait").stdout.split()[1]
+    wd = started_id(disp("start", td))
+    bait = os.path.join(repo, ".agent-tasks", "tasks", f"{td}.md")
+    with open(bait, encoding="utf-8") as f:
+        text = f.read()
+    with open(bait, "w", encoding="utf-8") as f:  # simulate a rogue hand-edit
+        f.write(text.replace("status: in_progress", "status: done", 1))
+    res = disp("wait", wd, check=False)
+    if res.returncode != 3:
+        fail(f"doctor reporting must not change wait's exit code: {res.returncode}")
+    if "doctor:" not in res.stdout or "status drift" not in res.stdout:
+        fail(f"wait should surface doctor findings: {res.stdout}")
+    tasksc("doctor", "--fix", check=False)  # heal the bait for later tests
+    tasksc("status", td, "cancelled")
+
     # ---- outbox sentinel: review (folded via `list`) ----
     set_cfg("review")
     tr = tasksc("create", "Sentinel review task").stdout.split()[1]
