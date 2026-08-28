@@ -67,10 +67,11 @@ agents working the queue **directly** (self-claimed, no dispatcher).
      immediately** and report.
    - Log milestones as you go: `tasks log TASK-042 "root cause: <x>"` — the
      work log is how the planner watches you without interrupting.
-   - Put longer findings/decisions in the note's **Notes** section by editing
-     the file directly (`tasks note TASK-042` prints the path). The note body
-     is yours to edit; keep **Work log** as the last section, and change
-     status/blockers/assignee only via the CLI.
+   - Put longer findings/decisions into the note's **Notes** section with
+     `tasks note TASK-042 --append --agent <you>` (block from stdin or
+     `--file`) — stamped, locked, and it never touches frontmatter. Keep
+     **Work log** as the last section; change status/blockers/assignee only
+     via the CLI.
    - **Escalate, don't expand.** Found an adjacent bug, a security hole, a
      refactor itch? `tasks create "..." --body "found while working TASK-042:
      ..."` and keep going on your own task. Never widen your scope unattended —

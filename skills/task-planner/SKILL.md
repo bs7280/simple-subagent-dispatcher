@@ -46,9 +46,10 @@ tasks create "Fix login redirect loop" \
 Rules for a good task note:
 - **Self-contained.** Everything the worker needs is in the note: context, file
   paths, repro steps, constraints, acceptance criteria. Never rely on "as we
-  discussed". After `create`, edit the note file directly (path is printed) to
-  add detail — the note body is free-form markdown; only keep **Work log** as
-  the last section.
+  discussed". After `create`, add detail with `tasks note TASK-042 --append`
+  (stdin or `--file`; stamped and locked) or edit the note file directly —
+  the note body is free-form markdown; only keep **Work log** as the last
+  section.
 - **One reviewable unit.** If you can't state acceptance criteria, split it.
 - **Pin the model when it matters.** `--model opus` on a hard task,
   `--model haiku` on a mechanical one; leave it unset when any model will do.

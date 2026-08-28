@@ -459,10 +459,57 @@ def test_utf8_discipline(tmp):
         fail("re-init must not reset the index")
 
 
+def test_note_append(tmp):
+    q = Queue(tmp)
+    q.run("init")
+    t = q.out("create", "Rich notes").split()[1]
+
+    # two concurrent appends both land intact, serialized by the queue lock
+    blocks = ["first finding:\nline a\nline b", "second finding:\nline c"]
+    procs = []
+    for i, block in enumerate(blocks):
+        p = subprocess.Popen([PY, CLI, "note", t, "--append", "--agent", f"n{i}"],
+                             cwd=tmp, stdin=subprocess.PIPE, text=True,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        procs.append((p, block))
+    errs = [p.communicate(input=block)[1] for p, block in procs]
+    if any(p.returncode != 0 for p, _ in procs):
+        fail(f"concurrent note --append failed: {errs}")
+    note = q.note_text(t)
+    for block in blocks:
+        if block.replace("\\n", "\n") not in note:
+            pass
+    if "line a\nline b" not in note or "line c" not in note:
+        fail(f"appended blocks not intact:\n{note}")
+    if note.count("status: open") != 1:
+        fail("frontmatter must be untouched")
+    if not (note.index("line c") < note.index("## Work log")):
+        fail("appends must land in Notes, before the Work log")
+    if note.count("notes appended") != 2:
+        fail("each append should be recorded in the work log")
+
+    # --file variant + stamping
+    blob = os.path.join(tmp, "blob.md")
+    with open(blob, "w", encoding="utf-8") as f:
+        f.write("from a file")
+    q.run("note", t, "--append", "--file", blob, "--agent", "filer")
+    note = q.note_text(t)
+    if "from a file" not in note or "**[filer @" not in note:
+        fail("--file append missing or unstamped")
+
+    # empty input dies
+    p = subprocess.Popen([PY, CLI, "note", t, "--append", "--agent", "x"],
+                         cwd=tmp, stdin=subprocess.PIPE, text=True,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p.communicate(input="   ")
+    if p.returncode == 0:
+        fail("empty append should fail")
+
+
 def main():
     for test in (test_lifecycle, test_leases, test_tiers, test_resources,
                  test_doctor, test_mutex, test_concurrent_logs,
-                 test_utf8_discipline):
+                 test_utf8_discipline, test_note_append):
         tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
         try:
             test(tmp)

@@ -718,7 +718,48 @@ def cmd_heartbeat(args):
 def cmd_note(args):
     root = find_dir()
     index = load_index(root)
-    print(note_path(root, resolve_id(index, args.id)))
+    tid = resolve_id(index, args.id)
+    if not args.append:
+        print(note_path(root, tid))
+        return
+    # --append: the CLI-side equivalent of the dispatched-worker outbox, for
+    # humans and capable agents working the queue directly -- a stamped block
+    # into ## Notes, under the queue lock, frontmatter untouched.
+    agent = default_agent(args.agent)
+    if args.file:
+        with open(args.file, encoding="utf-8") as f:
+            block = f.read()
+    else:
+        block = sys.stdin.read()
+    block = block.strip()
+    if not block:
+        die("nothing to append (empty input)")
+    stamped = f"**[{agent} @ {now()}]**\n\n{block}\n"
+    with Lock(root):
+        path = note_path(root, tid)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        m = re.search(r"^## Notes\s*$", text, re.M)
+        if m:
+            rest = text[m.end():]
+            nxt = re.search(r"^## ", rest, re.M)
+            pos = m.end() + (nxt.start() if nxt else len(rest))
+            text = (text[:pos].rstrip("\n") + "\n\n" + stamped + "\n"
+                    + text[pos:].lstrip("\n"))
+        else:
+            wl = re.search(r"^## Work log\s*$", text, re.M)
+            if wl:  # keep Work log the last section
+                text = (text[:wl.start()].rstrip("\n") + "\n\n## Notes\n\n"
+                        + stamped + "\n" + text[wl.start():])
+            else:
+                text = text.rstrip("\n") + "\n\n## Notes\n\n" + stamped
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        index = load_index(root)
+        index["tasks"][tid]["updated"] = now()
+        save_index(root, index)
+        append_log(root, tid, agent, "notes appended")
+    print(f"appended to {tid} Notes")
 
 
 def _runtime_dir(root):
@@ -1025,8 +1066,13 @@ def main():
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_heartbeat)
 
-    p = sub.add_parser("note", help="print the path to a task's note file")
+    p = sub.add_parser("note", help="print a task's note path, or --append "
+                                    "a stamped block into its Notes section")
     p.add_argument("id")
+    p.add_argument("--append", action="store_true",
+                   help="append a block (from --file or stdin) into ## Notes")
+    p.add_argument("--file", help="read the block from this file instead of stdin")
+    agent_flag(p)
     p.set_defaults(func=cmd_note)
 
     p = sub.add_parser("lock", help="acquire a named mutex (exit 4 = BUSY); "

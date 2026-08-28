@@ -105,7 +105,7 @@ queue at any time.
 | `block ID BLOCKER...` / `unblock ID BLOCKER...` | manage blockers |
 | `assign ID NAME` | set assignee |
 | `log ID MESSAGE` | append a timestamped work-log entry to the note |
-| `note ID` | print the note file's path |
+| `note ID [--append [--file F] --agent X]` | print the note's path — or `--append` a stamped block (stdin or `--file`) into its `## Notes` section under the queue lock: the direct-agent equivalent of the worker outbox |
 | `board [--json]` | one-screen status overview |
 | `lock NAME --agent X` / `unlock NAME --agent X` | named mutex for shared-checkout spans (e.g. `lock commit`); exit 4 = BUSY naming the holder; stale locks stolen after `mutex_stale_minutes` (default 30) |
 | `doctor [--fix]` | integrity report: index/note status drift, orphan claims, stray/missing notes; exit 1 on findings (`--fix` rewrites drifted frontmatter from the index) |
