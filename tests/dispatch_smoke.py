@@ -197,12 +197,12 @@ def run_all(tmp):
     if "exited" not in list_row(wid):
         fail("stopped worker still alive")
 
-    # watch: stub sessions write no real transcript -> spawn-log fallback
-    res = disp("watch", wid)
-    if "showing spawn log instead" not in res.stdout:
-        fail(f"watch should degrade to the spawn log, saying so: {res.stdout}")
-    if "FAKE-CLAUDE ARGS:" not in res.stdout:
-        fail("watch fallback should tail the spawn log content")
+    # watch: stub sessions write no real transcript -> spawn-only timeline
+    res = disp("watch", wid, "--from-start")
+    if "showing the spawn log only" not in res.stdout:
+        fail(f"watch should say the transcript is missing: {res.stdout}")
+    if "[spawn] FAKE-CLAUDE ARGS:" not in res.stdout:
+        fail(f"spawn-log lines should carry the [spawn] prefix: {res.stdout}")
 
     # worker resolution by task id and by unique prefix
     disp("wait", t1, check=False)

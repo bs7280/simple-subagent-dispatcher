@@ -141,7 +141,7 @@ lacks:
 |---|---|
 | `start TASK-042 [--worktree\|--in-place] [--model] [--agent-name] [--force]` (alias: `run`) | **pre-claims the task atomically, then** spawns a worker with a ready-made prompt (verify assignment → work → log → heartbeat → finish to `review`) |
 | `list [--json]` | all workers; flags `[NEEDS-RESUME]` on any that exited while its task was still `in_progress` |
-| `watch WORKER [--follow] [--tail N] [--from-start]` | show/tail the worker's transcript as compact events; if the transcript can't be located (path encoding varies across Claude Code versions) it falls back to the spawn log and says so |
+| `watch WORKER [--follow] [--tail N] [--from-start]` | one merged timeline from both evidence streams — `[session]` transcript events beside `[spawn]` log lines (permission warnings, CLI errors), so a deny-rule warning shows up next to the tool call it explains; degrades to spawn-only when the transcript can't be located, and picks the transcript up live if it appears |
 | `wait WORKER [--timeout]` | block until it exits — exit 3 = died mid-task, 2 = timeout; on exit it folds the outbox and runs `tasks doctor`, printing findings (exit code stays task-status-driven) |
 | `resume WORKER [--prompt]` | continue a dead worker's session (default continuation prompt re-orients it: re-read task, check `git status`, carry on) |
 | `stop WORKER` | SIGTERM; the session survives for `resume` |

@@ -588,45 +588,76 @@ def parse_line(line):
 
 
 def cmd_watch(args):
+    """One merged timeline from both evidence streams: the session transcript
+    (tool activity) prefixed [session], and the spawn log (permission
+    warnings, CLI-level errors, stub/stderr output) prefixed [spawn]. Deny-
+    rule warnings appear beside the tool calls they explain -- previously a
+    watcher had to read two files to see that."""
     root = tasks.find_dir()
     workers = load_workers(root)
     wid = resolve_worker(root, workers, args.worker)
     w = workers[wid]
     cfg = load_config(root)
     maybe_fold(root, workers, wid)
-    path = find_transcript(w["session_id"])
-    if path:
-        parse = parse_line
-        print(f"transcript: {path}  (worker {wid}, {worker_state(w)})")
-    else:
-        # transcript locations vary across Claude Code versions (the cwd ->
-        # dirname encoding is unstable); degrade to the spawn log, and say so
-        path = os.path.join(root, RUNTIME, "logs", f"{wid}.out")
-        if not os.path.isfile(path):
-            tasks.die(f"no transcript found for session {w['session_id']} and "
-                      f"no spawn log at {path}")
-        parse = (lambda line: [line.rstrip("\n")] if line.strip() else [])
-        print(f"transcript not found for session {w['session_id']} -- "
-              f"showing spawn log instead: {path}  (worker {wid}, {worker_state(w)})")
-    with open(procs.long_path(path), encoding="utf-8") as f:
-        events = [e for line in f for e in parse(line)]
-        if not args.from_start:
-            events = events[-args.tail:]
-        for e in events:
-            print(e)
+
+    def raw(line):
+        return [line.rstrip("\n")] if line.strip() else []
+
+    sources = []  # spawn first: its warnings precede session activity
+    spath = os.path.join(root, RUNTIME, "logs", f"{wid}.out")
+    if os.path.isfile(spath):
+        sources.append(("spawn", spath, raw))
+    tpath = find_transcript(w["session_id"])
+    if tpath:
+        sources.append(("session", tpath, parse_line))
+    if not sources:
+        tasks.die(f"nothing to watch: no transcript for session "
+                  f"{w['session_id']} and no spawn log at {spath}")
+    if not tpath:
+        print(f"(no transcript found for session {w['session_id']} -- "
+              f"showing the spawn log only)")
+    print(f"watching {wid} ({worker_state(w)}): "
+          + "  ".join(f"[{name}] {path}" for name, path, _ in sources))
+
+    handles = []
+    try:
+        for name, path, parse in sources:
+            f = open(procs.long_path(path), encoding="utf-8", errors="replace")
+            events = [f"[{name}] {e}" for line in f for e in parse(line)]
+            if not args.from_start:
+                events = events[-args.tail:]
+            for e in events:
+                print(e)
+            handles.append([name, f, parse, ""])
         if not args.follow:
             return
-        buf = ""
+
         hb_every, last_hb = heartbeat_interval(cfg), 0.0
+        probe_at = time.time() + 2.0
         while True:
-            chunk = f.readline()
-            if chunk:
-                buf += chunk
-                if buf.endswith("\n"):
-                    for e in parse(buf):
-                        print(e, flush=True)
-                    buf = ""
+            got = False
+            for h in handles:
+                name, f, parse = h[0], h[1], h[2]
+                chunk = f.readline()
+                while chunk:
+                    got = True
+                    h[3] += chunk
+                    if h[3].endswith("\n"):
+                        for e in parse(h[3]):
+                            print(f"[{name}] {e}", flush=True)
+                        h[3] = ""
+                    chunk = f.readline()
+            if got:
                 continue
+            if tpath is None and time.time() >= probe_at:
+                # the transcript may appear moments after the session starts
+                probe_at = time.time() + 2.0
+                tpath = find_transcript(w["session_id"])
+                if tpath:
+                    f = open(procs.long_path(tpath), encoding="utf-8",
+                             errors="replace")
+                    handles.append(["session", f, parse_line, ""])
+                    print(f"[session] transcript appeared: {tpath}", flush=True)
             if not pid_alive(w["pid"]):
                 folded = maybe_fold(root, workers, wid)
                 print(f"[worker {wid} exited"
@@ -637,6 +668,9 @@ def cmd_watch(args):
                 auto_heartbeat(root, w, cfg)
                 last_hb = time.time()
             time.sleep(0.5)
+    finally:
+        for h in handles:
+            h[1].close()
 
 
 def cmd_wait(args):
