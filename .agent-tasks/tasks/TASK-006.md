@@ -24,3 +24,4 @@ _(worker scratch space — findings, decisions, open questions)_
 ## Work log
 
 - 2026-08-28T19:02:47Z [planner] created
+- 2026-08-28T20:19:18Z [planner] since the outbox redesign, 'dispatch prompt' also carries a placeholder <worker-id> outbox path — the --self-claim variant should emit the CLI-based contract (claim + log + status review) for capable direct agents instead

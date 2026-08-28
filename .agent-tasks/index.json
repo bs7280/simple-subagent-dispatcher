@@ -78,8 +78,21 @@
         "dispatcher"
       ],
       "created": "2026-08-28T19:02:47Z",
-      "updated": "2026-08-28T19:02:47Z",
+      "updated": "2026-08-28T20:19:18Z",
       "note": "tasks/TASK-006.md"
+    },
+    "TASK-007": {
+      "title": "Auto-heartbeat coverage for list-only supervisors",
+      "status": "open",
+      "priority": "low",
+      "assignee": null,
+      "blockers": [],
+      "tags": [
+        "dispatcher"
+      ],
+      "created": "2026-08-28T20:19:18Z",
+      "updated": "2026-08-28T20:19:18Z",
+      "note": "tasks/TASK-007.md"
     }
   }
 }
