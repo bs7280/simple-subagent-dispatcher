@@ -23,3 +23,4 @@ _(worker scratch space — findings, decisions, open questions)_
 ## Work log
 
 - 2026-08-28T17:43:16Z [planner] created
+- 2026-08-28T19:02:46Z [planner] P0-2 landed scripts/procs.py (Windows-safe liveness/terminate) — this task's remaining scope is pid-reuse-after-reboot detection (record process start time or boot id; treat mismatch as exited). Note: Windows is_alive treats exit code 259 (STILL_ACTIVE) as running — fold a fix in here if it ever bites

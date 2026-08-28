@@ -23,3 +23,4 @@ _(worker scratch space — findings, decisions, open questions)_
 ## Work log
 
 - 2026-08-28T17:43:16Z [planner] created
+- 2026-08-28T19:02:46Z [planner] P2-3 made appends locked (no interleaving), but placement is still end-of-file — the insert-under-'## Work log' fix this task describes is still open

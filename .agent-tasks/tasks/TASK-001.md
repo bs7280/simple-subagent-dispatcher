@@ -23,3 +23,4 @@ _(worker scratch space — findings, decisions, open questions)_
 ## Work log
 
 - 2026-08-28T17:43:16Z [planner] created
+- 2026-08-28T19:02:46Z [planner] test suites are now Python (tests/smoke.py, dispatch_smoke.py, procs_smoke.py) run via 'uv run python' — CI workflow should install uv (astral-sh/setup-uv) and run all three; windows-latest is now a viable third OS target thanks to the procs shim

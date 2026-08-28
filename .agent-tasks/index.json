@@ -11,7 +11,7 @@
         "ci"
       ],
       "created": "2026-08-28T17:43:16Z",
-      "updated": "2026-08-28T17:43:16Z",
+      "updated": "2026-08-28T19:02:46Z",
       "note": "tasks/TASK-001.md"
     },
     "TASK-002": {
@@ -24,7 +24,7 @@
         "cli"
       ],
       "created": "2026-08-28T17:43:16Z",
-      "updated": "2026-08-28T17:43:16Z",
+      "updated": "2026-08-28T19:02:46Z",
       "note": "tasks/TASK-002.md"
     },
     "TASK-003": {
@@ -37,7 +37,7 @@
         "dispatcher"
       ],
       "created": "2026-08-28T17:43:16Z",
-      "updated": "2026-08-28T17:43:16Z",
+      "updated": "2026-08-28T19:02:46Z",
       "note": "tasks/TASK-003.md"
     },
     "TASK-004": {
@@ -67,6 +67,19 @@
       "created": "2026-08-28T17:43:17Z",
       "updated": "2026-08-28T17:43:17Z",
       "note": "tasks/TASK-005.md"
+    },
+    "TASK-006": {
+      "title": "dispatch prompt --self-claim variant",
+      "status": "open",
+      "priority": "low",
+      "assignee": null,
+      "blockers": [],
+      "tags": [
+        "dispatcher"
+      ],
+      "created": "2026-08-28T19:02:47Z",
+      "updated": "2026-08-28T19:02:47Z",
+      "note": "tasks/TASK-006.md"
     }
   }
 }
