@@ -30,7 +30,6 @@ import glob
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 import tempfile
@@ -38,6 +37,7 @@ import time
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import procs  # noqa: E402  -- cross-platform process shim, same directory
 import tasks  # noqa: E402  -- the queue CLI, same directory
 
 RUNTIME = "runtime"
@@ -102,14 +102,7 @@ def save_workers(root, workers):
     os.replace(tmp, os.path.join(rt, WORKERS_FILE))
 
 
-def pid_alive(pid):
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+pid_alive = procs.is_alive  # all liveness checks go through the shim
 
 
 def worker_state(w):
@@ -229,9 +222,7 @@ def spawn(root, workdir, cmd, log_path, agent):
         logf.write((f"\n=== {tasks.now()} spawn: " + " ".join(cmd[:-1])
                     + " <prompt>\n").encode())
         logf.flush()
-        return subprocess.Popen(cmd, cwd=workdir, env=env,
-                                stdin=subprocess.DEVNULL, stdout=logf,
-                                stderr=subprocess.STDOUT, start_new_session=True)
+        return procs.spawn(cmd, workdir, env, logf)
 
 
 def claude_cmd(cfg, args, base):
@@ -483,10 +474,7 @@ def cmd_stop(args):
     if not pid_alive(w["pid"]):
         print(f"{wid} is not running")
         return
-    try:
-        os.killpg(os.getpgid(w["pid"]), signal.SIGTERM)
-    except OSError:
-        os.kill(w["pid"], signal.SIGTERM)
+    procs.terminate_tree(w["pid"])
     with tasks.Lock(root):
         tasks.append_log(root, w["task"], "dispatcher", f"stopped worker {wid}")
     print(f"stopped {wid} (pid {w['pid']}); its session survives -- "
