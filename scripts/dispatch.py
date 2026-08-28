@@ -30,6 +30,7 @@ import glob
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -223,6 +224,16 @@ def claude_cmd(cfg, args, base):
     pm = getattr(args, "permission_mode", None) or cfg["permission_mode"]
     bin_arg = getattr(args, "claude_bin", None) or cfg["claude_bin"]
     bin_argv = list(bin_arg) if isinstance(bin_arg, list) else [bin_arg]
+    # Resolve through shutil.which: on Windows the claude CLI is an npm shim
+    # (claude / claude.cmd / claude.ps1) and Popen does no PATHEXT resolution,
+    # so a bare "claude" dies with WinError 2. which() honors PATHEXT and
+    # returns the runnable form; it passes absolute paths straight through.
+    resolved = shutil.which(bin_argv[0])
+    if resolved is None:
+        tasks.die(f"claude binary '{bin_argv[0]}' not found (searched PATH via "
+                  f"shutil.which, PATHEXT honored on Windows) -- set "
+                  f"claude_bin in .agent-tasks/config.json or pass --claude-bin")
+    bin_argv[0] = resolved
     cmd = [*bin_argv, "-p", "--permission-mode", pm] + base
     # The worker must always be able to run the queue CLI unattended (claim,
     # log, block, finish) -- pre-approve it under both quoting styles a worker

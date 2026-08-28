@@ -207,6 +207,22 @@ def run_all(tmp):
         fail(f"double-dispatch spawned {len(contested)} workers")
     disp("wait", tc, check=False)
 
+    # ---- unresolvable claude binary: clear error, pre-claim reverted ----
+    tb = tasksc("create", "Binary-less task").stdout.split()[1]
+    res = disp("start", tb, "--claude-bin", "definitely-not-a-real-binary-xyz",
+               check=False)
+    if res.returncode == 0:
+        fail("unresolvable claude binary should fail the start")
+    if "not found" not in res.stderr or "claude_bin" not in res.stderr:
+        fail(f"unresolved-binary error should name the fix: {res.stderr}")
+    t = json.loads(tasksc("show", tb, "--json").stdout)
+    if t["status"] != "open" or t["assignee"]:
+        fail(f"failed spawn must revert the pre-claim: {t}")
+    with open(os.path.join(repo, ".agent-tasks", "tasks", f"{tb}.md"),
+              encoding="utf-8") as f:
+        if "reverted pre-claim" not in f.read():
+            fail("revert should be logged in the work log")
+
     # ---- start refuses blocked tasks without --force ----
     t3 = tasksc("create", "Blocked", "--blocked-by", t2).stdout.split()[1]
     if disp("start", t3, check=False).returncode == 0:

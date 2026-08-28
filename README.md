@@ -56,8 +56,11 @@ you want the dispatcher) anywhere; zero dependencies (Python ≥ 3.8).
   tree terminate) with native Windows implementations — no POSIX-only calls
   on the main path. All executable surfaces (tests, bootstrap hooks) are
   Python, not shell.
-- `claude_bin` may be a string or an argv list (e.g. `["cmd", "/c", "claude"]`)
-  if your platform needs it.
+- `claude_bin` may be a string or an argv list, and is resolved through
+  `shutil.which` at spawn time — on Windows the claude CLI is an npm shim
+  (`claude.cmd`), which plain `Popen` can't find; `which` honors `PATHEXT`.
+  An unresolvable binary fails fast with the fix named (config `claude_bin`
+  or `--claude-bin`), and the pre-claim is reverted.
 
 ## Quickstart
 
