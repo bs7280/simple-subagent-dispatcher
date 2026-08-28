@@ -145,10 +145,12 @@ def run_all(tmp):
     time.sleep(1)
     log = log_text(wid)
     spawn_line = next(l for l in log.splitlines() if "spawn:" in l)
-    if "tasks/**)" not in spawn_line or "index.json)" not in spawn_line:
-        fail(f"deny rules should cover index.json and tasks/**: {spawn_line}")
-    if "NotebookEdit(" not in spawn_line:
-        fail("deny rules should cover NotebookEdit too")
+    if "Edit(" not in spawn_line or "tasks/**)" not in spawn_line \
+            or "index.json)" not in spawn_line:
+        fail(f"deny rules should cover index.json and tasks/** via Edit(): {spawn_line}")
+    if "Write(" in spawn_line or "NotebookEdit(" in spawn_line:
+        fail("only Edit() deny rules enforce; Write/NotebookEdit forms are "
+             f"dead weight the harness warns about: {spawn_line}")
     if "outbox" in spawn_line:
         fail("the outbox must NOT be covered by the deny rules")
     for needle, msg in [

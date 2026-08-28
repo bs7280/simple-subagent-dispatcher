@@ -181,9 +181,11 @@ project's default in **`.agent-tasks/config.json`** (all keys optional):
   entry for the queue CLI itself, composed from the configured `runner` in
   both quoting styles so pre-approvals always match the prompts, plus whatever
   rules you put in `allowed_tools`. In the other direction, dispatched workers
-  get `--disallowedTools` rules denying `Edit`/`Write`/`NotebookEdit` on
-  `index.json` and `tasks/**` — queue state is read-only to them, while the
-  outbox stays writable (it's the sanctioned surface) (e.g.
+  get `--disallowedTools` rules `Edit(…/index.json)` and `Edit(…/tasks/**)` —
+  only `Edit(path)` rules are matched by file permission checks, and they
+  cover *all* file-editing tools, so those two rules are the whole fence.
+  Queue state is read-only to workers while the outbox stays writable (it's
+  the sanctioned surface) (e.g.
   `"Bash(pnpm test:*)"`, `"Bash(git commit:*)"` — the commands *your* workers
   need). Everything else is **denied, never prompted** — a headless session
   can't answer a prompt, and a denied action lets the run continue and shows
