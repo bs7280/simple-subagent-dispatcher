@@ -126,7 +126,10 @@ def run_all(tmp):
     set_cfg()
 
     # ---- start in-place (default) ----
-    wid = started_id(disp("start", t1))
+    start_res = disp("start", t1)
+    wid = started_id(start_res)
+    if "outbox:" not in start_res.stdout or f"{wid}.md" not in start_res.stdout:
+        fail(f"start should print the outbox path: {start_res.stdout}")
     t = json.loads(tasksc("show", t1, "--json").stdout)
     if t["status"] != "in_progress" or t["assignee"] != wid:
         fail(f"start should pre-claim for the minted worker: {t}")
@@ -135,6 +138,8 @@ def run_all(tmp):
     ob1 = os.path.join(repo, ".agent-tasks", "runtime", "outbox", f"{wid}.md")
     if not os.path.isfile(ob1):
         fail("outbox not created at spawn")
+    if f"{wid}.md" not in disp("list").stdout:
+        fail("list should show a running worker's outbox path")
     with open(os.path.join(repo, ".agent-tasks", "tasks", f"{t1}.md")) as f:
         if f"dispatched worker {wid}" not in f.read():
             fail("dispatch not logged to task note")

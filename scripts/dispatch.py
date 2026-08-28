@@ -533,6 +533,7 @@ def cmd_start(args):
     print(f"  task: {tid}   pid: {proc.pid}   model: {model or '(default)'}   "
           f"permission-mode: {pm}")
     print(f"  cwd:  {workdir}" + (f"   (worktree branch {branch})" if branch else ""))
+    print(f"  outbox: {outbox}")
     print(f"  log:  {log_path}")
     print(f"  next: `watch {worker_id} --follow` to observe, `wait {worker_id}` to block")
 
@@ -577,6 +578,8 @@ def cmd_list(args):
         if needs_resume(index, workers, wid):
             line += "  [NEEDS-RESUME]"
         print(line)
+        if state == "running" and w.get("outbox"):
+            print(f"{'':<24} outbox: {w['outbox']}")
 
 
 # ---------------------------------------------------------------- watch
