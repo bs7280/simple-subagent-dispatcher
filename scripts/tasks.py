@@ -121,18 +121,26 @@ def find_dir(require=True):
 
 
 class Lock:
-    """Exclusive lock over the queue folder via O_EXCL lock file."""
+    """Exclusive lock over the queue folder via O_EXCL lock file. Reentrant
+    within one process, so helpers like append_log can insist on the lock
+    whether or not the caller already holds it."""
+
+    _depth = {}  # lock path -> this process's reentrancy depth
 
     def __init__(self, root):
         self.path = os.path.join(root, LOCK)
 
     def __enter__(self):
+        if Lock._depth.get(self.path, 0):
+            Lock._depth[self.path] += 1
+            return self
         deadline = time.time() + LOCK_TIMEOUT
         while True:
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
                 os.write(fd, str(os.getpid()).encode())
                 os.close(fd)
+                Lock._depth[self.path] = 1
                 return self
             except FileExistsError:
                 try:
@@ -146,6 +154,11 @@ class Lock:
                 time.sleep(0.05)
 
     def __exit__(self, *exc):
+        depth = Lock._depth.get(self.path, 1) - 1
+        if depth > 0:
+            Lock._depth[self.path] = depth
+            return
+        Lock._depth.pop(self.path, None)
         try:
             os.unlink(self.path)
         except OSError:
@@ -340,9 +353,12 @@ def set_note_status(root, tid, status):
 
 
 def append_log(root, tid, agent, msg):
-    """Append to the Work log. The Work log must stay the note's last section."""
-    with open(note_path(root, tid), "a") as f:
-        f.write(f"- {now()} [{agent}] {msg}\n")
+    """Append to the Work log. The Work log must stay the note's last section.
+    Serialized under the queue lock (reentrant if the caller holds it), so
+    concurrent appends can't interleave."""
+    with Lock(root):
+        with open(note_path(root, tid), "a") as f:
+            f.write(f"- {now()} [{agent}] {msg}\n")
 
 
 # ---------------------------------------------------------------- output

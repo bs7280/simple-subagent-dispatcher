@@ -5,6 +5,7 @@ Stdlib only, cross-platform (no shell). Run: uv run python tests/smoke.py
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -371,9 +372,27 @@ def test_mutex(tmp):
         fail("runtime self-gitignore missing")
 
 
+def test_concurrent_logs(tmp):
+    q = Queue(tmp)
+    q.run("init")
+    t = q.out("create", "Log target").split()[1]
+    procs = [subprocess.Popen([PY, CLI, "log", t, f"entry-{i}", "--agent", f"w{i}"],
+                              cwd=tmp, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+             for i in range(10)]
+    if any(p.wait() != 0 for p in procs):
+        fail("concurrent log invocation failed")
+    lines = [l for l in q.note_text(t).splitlines() if "entry-" in l]
+    if len(lines) != 10:
+        fail(f"expected 10 log entries, got {len(lines)}")
+    for line in lines:
+        if not re.match(r"^- \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \[w\d\] entry-\d$", line):
+            fail(f"torn/interleaved log line: {line!r}")
+
+
 def main():
     for test in (test_lifecycle, test_leases, test_tiers, test_resources,
-                 test_doctor, test_mutex):
+                 test_doctor, test_mutex, test_concurrent_logs):
         tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
         try:
             test(tmp)

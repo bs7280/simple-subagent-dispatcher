@@ -416,13 +416,21 @@ def cmd_watch(args):
     wid = resolve_worker(root, workers, args.worker)
     w = workers[wid]
     path = find_transcript(w["session_id"])
-    if not path:
-        tasks.die(f"no transcript yet for session {w['session_id']} -- the worker may "
-                  f"not have started; check its spawn log: "
-                  f"{os.path.join(root, RUNTIME, 'logs', wid + '.out')}")
-    print(f"transcript: {path}  (worker {wid}, {worker_state(w)})")
+    if path:
+        parse = parse_line
+        print(f"transcript: {path}  (worker {wid}, {worker_state(w)})")
+    else:
+        # transcript locations vary across Claude Code versions (the cwd ->
+        # dirname encoding is unstable); degrade to the spawn log, and say so
+        path = os.path.join(root, RUNTIME, "logs", f"{wid}.out")
+        if not os.path.isfile(path):
+            tasks.die(f"no transcript found for session {w['session_id']} and "
+                      f"no spawn log at {path}")
+        parse = (lambda line: [line.rstrip("\n")] if line.strip() else [])
+        print(f"transcript not found for session {w['session_id']} -- "
+              f"showing spawn log instead: {path}  (worker {wid}, {worker_state(w)})")
     with open(path) as f:
-        events = [e for line in f for e in parse_line(line)]
+        events = [e for line in f for e in parse(line)]
         if not args.from_start:
             events = events[-args.tail:]
         for e in events:
@@ -435,7 +443,7 @@ def cmd_watch(args):
             if chunk:
                 buf += chunk
                 if buf.endswith("\n"):
-                    for e in parse_line(buf):
+                    for e in parse(buf):
                         print(e, flush=True)
                     buf = ""
                 continue
