@@ -48,7 +48,20 @@ def default_agent(explicit):
 
 
 CONFIG_DEFAULTS = {
+    # -- queue --
+    "runner": ["uv", "run", "python"],  # interpreter argv used everywhere a
+                                        # command is composed (prompts, skills,
+                                        # allowlists, bootstrap)
     "lease_minutes": 90,  # claim lease length; an expired lease is stealable
+    # -- dispatcher --
+    "worktree": False,          # isolate each worker in a git worktree?
+    "worktree_root": None,      # default: sibling "<repo>-worktrees/"
+    "model": None,              # default: the claude CLI's own default model
+    "permission_mode": "acceptEdits",
+    "allowed_tools": [],        # extra permission rules, e.g. ["Bash(pnpm test:*)"]
+    "bootstrap": ".claude/task-worker-bootstrap.py",  # run via runner in fresh worktrees
+    "claude_bin": "claude",     # string or argv list (e.g. ["cmd", "/c", "claude"])
+    "extra_args": [],           # extra claude CLI args, e.g. ["--verbose"]
 }
 
 
@@ -328,11 +341,13 @@ Machine-managed task queue shared by planner and worker agents
 - `config.json` — optional per-project dispatcher defaults (this is where a
   project records its own judgment calls). All keys optional:
   `worktree` (false), `worktree_root` (sibling `<repo>-worktrees/`),
+  `runner` (["uv", "run", "python"] — interpreter argv composed into worker
+  prompts, allowlists, and the bootstrap invocation),
   `lease_minutes` (90 — claim lease length; expired claims are stealable),
   `model` (claude CLI default), `permission_mode` ("acceptEdits"),
   `allowed_tools` ([] — extra permission rules for what your workers may run),
-  `bootstrap` (".claude/task-worker-bootstrap.sh"), `claude_bin` ("claude"),
-  `extra_args` ([]).
+  `bootstrap` (".claude/task-worker-bootstrap.py" — a Python script),
+  `claude_bin` ("claude" — string or argv list), `extra_args` ([]).
 - `runtime/` — machine-local dispatcher state (worker registry, spawn logs);
   self-gitignored, never committed.
 

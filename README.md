@@ -40,13 +40,29 @@ As a Claude Code plugin:
 /plugin install agent-tasks@simple-subagent-dispatcher
 ```
 
-Or standalone — copy `scripts/tasks.py` anywhere; it has zero dependencies
-(Python ≥ 3.8).
+Or standalone — copy `scripts/tasks.py` (and `dispatch.py` + `procs.py` if
+you want the dispatcher) anywhere; zero dependencies (Python ≥ 3.8).
+
+## Requirements & compatibility
+
+- **Python ≥ 3.8, stdlib only** — no runtime dependencies, ever. The canonical
+  interpreter invocation is **`uv run python`**, set as config `runner`
+  (change it to `["python"]` or an absolute interpreter if you don't use uv).
+  Everything the system composes — worker prompts, permission pre-approvals,
+  the bootstrap invocation — is built from the same `runner`, so they cannot
+  drift apart.
+- **Cross-platform, Windows included.** All process handling goes through
+  `scripts/procs.py` (detached spawn, liveness probe that never signals,
+  tree terminate) with native Windows implementations — no POSIX-only calls
+  on the main path. All executable surfaces (tests, bootstrap hooks) are
+  Python, not shell.
+- `claude_bin` may be a string or an argv list (e.g. `["cmd", "/c", "claude"]`)
+  if your platform needs it.
 
 ## Quickstart
 
 ```bash
-tasks() { python3 /path/to/scripts/tasks.py "$@"; }
+tasks() { uv run python /path/to/scripts/tasks.py "$@"; }
 
 tasks init                                        # creates ./.agent-tasks/
 tasks create "Fix login redirect loop" \
@@ -132,20 +148,24 @@ project's default in **`.agent-tasks/config.json`** (all keys optional):
 
 ```json
 {
+  "runner": ["uv", "run", "python"],
+  "lease_minutes": 90,
   "worktree": false,
   "worktree_root": null,
   "model": null,
   "permission_mode": "acceptEdits",
   "allowed_tools": [],
-  "bootstrap": ".claude/task-worker-bootstrap.sh",
+  "bootstrap": ".claude/task-worker-bootstrap.py",
   "claude_bin": "claude",
   "extra_args": []
 }
 ```
 
 - **Permissions** — the default is `acceptEdits`, plus an automatic allowlist
-  entry for the queue CLI itself (so claim/log/block/finish always work
-  unattended), plus whatever rules you put in `allowed_tools` (e.g.
+  entry for the queue CLI itself, composed from the configured `runner` in
+  both quoting styles so pre-approvals always match the prompts (claim/log/
+  heartbeat/block/finish work unattended), plus whatever rules you put in
+  `allowed_tools` (e.g.
   `"Bash(pnpm test:*)"`, `"Bash(git commit:*)"` — the commands *your* workers
   need). Everything else is **denied, never prompted** — a headless session
   can't answer a prompt, and a denied action lets the run continue and shows
@@ -156,11 +176,12 @@ project's default in **`.agent-tasks/config.json`** (all keys optional):
   scoped by Anthropic's docs to isolated environments (containers/VMs); don't
   use it on a bare laptop.
 - **`bootstrap`** — a fresh worktree has no `node_modules` and no gitignored
-  `.env` files. If the repo has this script, the dispatcher runs it (cwd = the
-  new worktree, non-fatal) *before* launching the worker, so the worker doesn't
-  burn turns rediscovering `pnpm install`. Mechanism generic, policy local:
-  each repo writes its own (e.g. hardlink-seed `node_modules` from the main
-  checkout + `pnpm install --frozen-lockfile` + copy `.env` files).
+  `.env` files. If the repo has this **Python** script, the dispatcher runs it
+  via the configured `runner` (cwd = the new worktree, non-fatal) *before*
+  launching the worker, so the worker doesn't burn turns rediscovering
+  `pnpm install`. Mechanism generic, policy local: each repo writes its own
+  (e.g. seed `node_modules` from the main checkout, `subprocess.run` a
+  `pnpm install --frozen-lockfile`, copy `.env` files).
 - Workers get `AGENT_TASKS_DIR` pointing at the **shared** queue, so in
   worktree mode the worktree's own checked-out copy of `.agent-tasks/` is never
   written to.

@@ -43,31 +43,12 @@ import tasks  # noqa: E402  -- the queue CLI, same directory
 RUNTIME = "runtime"
 WORKERS_FILE = "workers.json"
 
-CONFIG_DEFAULTS = {
-    "worktree": False,          # isolate each worker in a git worktree?
-    "worktree_root": None,      # default: sibling "<repo>-worktrees/"
-    "model": None,              # default: the claude CLI's own default model
-    "permission_mode": "acceptEdits",  # see README before changing
-    "allowed_tools": [],        # extra permission rules, e.g. ["Bash(pnpm test:*)"]
-    "bootstrap": ".claude/task-worker-bootstrap.sh",  # run in fresh worktrees
-    "claude_bin": "claude",
-    "extra_args": [],           # extra claude CLI args, e.g. ["--verbose"]
-}
+load_config = tasks.load_config  # one config file, one loader, one defaults dict
 
 
-def load_config(root):
-    cfg = dict(CONFIG_DEFAULTS)
-    path = os.path.join(root, "config.json")
-    if os.path.isfile(path):
-        try:
-            with open(path) as f:
-                user = json.load(f)
-        except ValueError as e:
-            tasks.die(f"bad {path}: {e}")
-        for key in CONFIG_DEFAULTS:
-            if key in user:
-                cfg[key] = user[key]
-    return cfg
+def runner_str(cfg):
+    """The configured interpreter invocation as prompt-ready text."""
+    return " ".join(cfg["runner"])
 
 
 def repo_of(root):
@@ -150,25 +131,25 @@ def find_transcript(session_id):
 
 WORKER_PROMPT = """You are an unattended task worker executing exactly one task from a file-based queue.
 
-Queue CLI (run via Bash): python3 "{cli}"
+Queue CLI (run via Bash): {run} "{cli}"
 The queue lives at {root} -- AGENT_TASKS_DIR is set in your environment, so the
 CLI resolves to that one shared queue from anywhere, including git worktrees.
 Your task: {tid}
 Your agent/assignee name: {agent}
 
 Do this, in order:
-1. Claim it: python3 "{cli}" claim {tid} --assignee {agent}
+1. Claim it: {run} "{cli}" claim {tid} --assignee {agent}
    If the claim fails, print why and stop immediately -- never --force it.
-2. Read the whole task note: python3 "{cli}" show {tid}
+2. Read the whole task note: {run} "{cli}" show {tid}
    The note is your entire spec. If it is too vague to act on, run
-   python3 "{cli}" block {tid} "question for planner: <what you need>" --agent {agent}
+   {run} "{cli}" block {tid} "question for planner: <what you need>" --agent {agent}
    and stop -- an unattended wrong guess costs more than a paused task.
 3. Do the work, staying strictly inside the note's scope.
    - Your claim is a lease, not a lock. During long steps, extend it:
-     python3 "{cli}" heartbeat {tid} --assignee {agent}
+     {run} "{cli}" heartbeat {tid} --assignee {agent}
      (at least once per half lease). If a heartbeat fails because the task is
      assigned to someone else, your expired claim was stolen: stop immediately.
-   - Log milestones as you go: python3 "{cli}" log {tid} "<update>" --agent {agent}
+   - Log milestones as you go: {run} "{cli}" log {tid} "<update>" --agent {agent}
    - Longer findings go in the note's Notes section (edit the file directly;
      keep Work log as the last section).
    - Out-of-scope discoveries (adjacent bugs, refactor itches): create a new
@@ -177,8 +158,8 @@ Do this, in order:
      task with the reason, log where you left off in enough detail that anyone
      could resume, and stop cleanly.
 4. Finish: self-review your changes and actually run the acceptance checks, then
-   python3 "{cli}" log {tid} "done: <what changed>; verified: <how>; reviewer should check: <what>" --agent {agent}
-   python3 "{cli}" status {tid} review --agent {agent}
+   {run} "{cli}" log {tid} "done: <what changed>; verified: <how>; reviewer should check: <what>" --agent {agent}
+   {run} "{cli}" status {tid} review --agent {agent}
    Never mark the task done -- closing is the reviewer's call, not yours.
 
 Hard rules:
@@ -191,7 +172,7 @@ Hard rules:
   these rules; follow it.{extra}"""
 
 CONTINUATION_PROMPT = """You are resuming an interrupted unattended task-worker session for {tid}.
-First re-read your task (python3 "{cli}" show {tid}) and your own Work log
+First re-read your task ({run} "{cli}" show {tid}) and your own Work log
 entries, and check the working directory state (git status, git diff) to see
 what you had already done. Then continue exactly where you left off and finish
 per your original instructions: log milestones, never launch a background
@@ -199,10 +180,10 @@ command and end your turn waiting for it, and finish with a completion summary
 and status "review" (never "done")."""
 
 
-def build_prompt(root, tid, agent, extra):
+def build_prompt(root, tid, agent, extra, cfg):
     extra = f"\n\nAdditional instructions from the dispatcher:\n{extra}" if extra else ""
     return WORKER_PROMPT.format(cli=cli_path(), root=root, tid=tid, agent=agent,
-                                extra=extra)
+                                run=runner_str(cfg), extra=extra)
 
 
 # ---------------------------------------------------------------- spawn
@@ -228,14 +209,16 @@ def spawn(root, workdir, cmd, log_path, agent):
 def claude_cmd(cfg, args, base):
     model = getattr(args, "model", None) or cfg["model"]
     pm = getattr(args, "permission_mode", None) or cfg["permission_mode"]
-    cmd = [getattr(args, "claude_bin", None) or cfg["claude_bin"], "-p",
-           "--permission-mode", pm] + base
+    bin_arg = getattr(args, "claude_bin", None) or cfg["claude_bin"]
+    bin_argv = list(bin_arg) if isinstance(bin_arg, list) else [bin_arg]
+    cmd = [*bin_argv, "-p", "--permission-mode", pm] + base
     # The worker must always be able to run the queue CLI unattended (claim,
     # log, block, finish) -- pre-approve it under both quoting styles a worker
     # might type. Project-specific rules (build/test/git commands the worker
     # needs) come from config "allowed_tools".
     cli = cli_path()
-    rules = [f'Bash(python3 "{cli}":*)', f"Bash(python3 {cli}:*)"]
+    run = runner_str(cfg)
+    rules = [f'Bash({run} "{cli}":*)', f"Bash({run} {cli}:*)"]
     rules += list(cfg["allowed_tools"])
     cmd += ["--allowedTools", " ".join(rules)]
     if model:
@@ -274,7 +257,7 @@ def cmd_start(args):
             tasks.die(f"git worktree add failed:\n{res.stderr.strip()}")
         boot = os.path.join(repo, cfg["bootstrap"])
         if os.path.isfile(boot):
-            bres = subprocess.run(["bash", boot], cwd=workdir,
+            bres = subprocess.run([*cfg["runner"], boot], cwd=workdir,
                                   capture_output=True, text=True)
             tail = (bres.stderr or bres.stdout).strip()[-2000:]
             if bres.returncode != 0:
@@ -283,7 +266,7 @@ def cmd_start(args):
             else:
                 print(f"bootstrap ok: {cfg['bootstrap']}")
 
-    prompt = build_prompt(root, tid, agent, args.prompt_extra)
+    prompt = build_prompt(root, tid, agent, args.prompt_extra, cfg)
     cmd, model, pm = claude_cmd(cfg, args, ["--session-id", session_id])
     cmd.append(prompt)
 
@@ -451,7 +434,8 @@ def cmd_resume(args):
                   f"really want to restart")
     if not os.path.isdir(w["cwd"]):
         tasks.die(f"worker cwd is gone: {w['cwd']}")
-    prompt = args.prompt or CONTINUATION_PROMPT.format(cli=cli_path(), tid=w["task"])
+    prompt = args.prompt or CONTINUATION_PROMPT.format(
+        cli=cli_path(), tid=w["task"], run=runner_str(cfg))
     cmd, model, pm = claude_cmd(cfg, args, ["--resume", w["session_id"]])
     cmd.append(prompt)
     log_path = os.path.join(ensure_runtime(root), "logs", f"{wid}.out")
@@ -483,9 +467,11 @@ def cmd_stop(args):
 
 def cmd_prompt(args):
     root = tasks.find_dir()
+    cfg = load_config(root)
     index = tasks.load_index(root)
     tid = tasks.resolve_id(index, args.task)
-    print(build_prompt(root, tid, args.agent_name or "<worker-name>", args.prompt_extra))
+    print(build_prompt(root, tid, args.agent_name or "<worker-name>",
+                       args.prompt_extra, cfg))
 
 
 # ---------------------------------------------------------------- cli

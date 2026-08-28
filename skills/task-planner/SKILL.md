@@ -16,11 +16,13 @@ execute them, then dispatch, monitor, and review.
 All queue mutations go through the CLI (it serializes concurrent writers):
 
 ```
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/tasks.py" <command>
+uv run python "${CLAUDE_PLUGIN_ROOT}/scripts/tasks.py" <command>
 ```
 
 If `CLAUDE_PLUGIN_ROOT` is not set, the plugin root is the directory two levels
-above this SKILL.md file. Below, `tasks` means that command. Run `tasks --help`
+above this SKILL.md file. `uv run python` is the canonical interpreter
+invocation; if the project's `.agent-tasks/config.json` sets a different
+`runner`, use that instead. Below, `tasks` means that command. Run `tasks --help`
 / `tasks <command> --help` for full flags; every read command takes `--json`.
 
 Identify yourself as `planner`: pass `--agent planner` on mutations, or

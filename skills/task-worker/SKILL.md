@@ -12,11 +12,13 @@ channel back to the planner is the queue — not your conversation output.
 ## The CLI
 
 ```
-python3 "${CLAUDE_PLUGIN_ROOT}/scripts/tasks.py" <command>
+uv run python "${CLAUDE_PLUGIN_ROOT}/scripts/tasks.py" <command>
 ```
 
 If `CLAUDE_PLUGIN_ROOT` is not set, the plugin root is the directory two levels
-above this SKILL.md file. Below, `tasks` means that command.
+above this SKILL.md file. `uv run python` is the canonical interpreter
+invocation; if the project's `.agent-tasks/config.json` sets a different
+`runner`, use that instead. Below, `tasks` means that command.
 
 Your agent name: use what the dispatch prompt assigned you (e.g.
 `worker-auth`); otherwise pick a short stable one. Pass it as
