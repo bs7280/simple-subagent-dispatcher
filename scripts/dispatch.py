@@ -61,6 +61,7 @@ def ensure_runtime(root):
     rt = os.path.join(root, RUNTIME)
     os.makedirs(os.path.join(rt, "logs"), exist_ok=True)
     os.makedirs(os.path.join(rt, "outbox"), exist_ok=True)
+    os.makedirs(os.path.join(rt, "prompts"), exist_ok=True)
     gi = os.path.join(rt, ".gitignore")
     if not os.path.exists(gi):
         with open(gi, "w", encoding="utf-8") as f:
@@ -303,7 +304,7 @@ def heartbeat_interval(cfg):
 
 # ---------------------------------------------------------------- spawn
 
-def spawn(root, workdir, cmd, log_path, agent, outbox=None):
+def spawn(root, workdir, cmd, log_path, agent, outbox=None, stdin=None):
     # Strip the parent session's CLAUDE_* env (CLAUDECODE, session id, child-
     # session marker, messaging socket, ...): a spawned worker that inherits it
     # is treated as a nested child session and loses the ability to self-approve
@@ -320,24 +321,51 @@ def spawn(root, workdir, cmd, log_path, agent, outbox=None):
         logf.write((f"\n=== {tasks.now()} spawn: " + " ".join(cmd[:-1])
                     + " <prompt>\n").encode())
         logf.flush()
-        return procs.spawn(cmd, workdir, env, logf)
+        return procs.spawn(cmd, workdir, env, logf, stdin=stdin)
+
+
+def resolve_claude_bin(bin_argv):
+    """which()-resolve argv[0] (on Windows the claude CLI is an npm shim trio
+    claude / claude.cmd / claude.ps1, and Popen does no PATHEXT resolution --
+    a bare "claude" dies with WinError 2). If the result is a .cmd/.bat shim,
+    unwrap to a sibling .exe when one exists, since cmd.exe mangles multi-line
+    argv (a prompt truncates at its first newline). Returns (argv, is_batch)
+    -- is_batch True means the binary is STILL a batch file and the prompt
+    must travel via stdin, not argv."""
+    resolved = shutil.which(bin_argv[0])
+    if resolved is None:
+        tasks.die(f"claude binary '{bin_argv[0]}' not found (searched PATH via "
+                  f"shutil.which, PATHEXT honored on Windows) -- set "
+                  f"claude_bin in .agent-tasks/config.json or pass --claude-bin")
+    if resolved.lower().endswith((".cmd", ".bat")):
+        exe = os.path.splitext(resolved)[0] + ".exe"
+        if os.path.isfile(exe):
+            return [exe, *bin_argv[1:]], False
+        return [resolved, *bin_argv[1:]], True
+    return [resolved, *bin_argv[1:]], False
+
+
+STDIN_POINTER = ("Your full instructions are the piped stdin content. "
+                 "Follow them exactly.")
+
+
+def write_prompt_file(root, name, prompt):
+    """Durable prompt: written for every spawn (audit + resume), and the
+    stdin source when the binary is a batch file."""
+    path = os.path.join(ensure_runtime(root), "prompts", name)
+    with open(procs.long_path(path), "w", encoding="utf-8") as f:
+        f.write(prompt)
+    return path
 
 
 def claude_cmd(cfg, args, base):
     model = getattr(args, "model", None) or cfg["model"]
     pm = getattr(args, "permission_mode", None) or cfg["permission_mode"]
     bin_arg = getattr(args, "claude_bin", None) or cfg["claude_bin"]
-    bin_argv = list(bin_arg) if isinstance(bin_arg, list) else [bin_arg]
-    # Resolve through shutil.which: on Windows the claude CLI is an npm shim
-    # (claude / claude.cmd / claude.ps1) and Popen does no PATHEXT resolution,
-    # so a bare "claude" dies with WinError 2. which() honors PATHEXT and
-    # returns the runnable form; it passes absolute paths straight through.
-    resolved = shutil.which(bin_argv[0])
-    if resolved is None:
-        tasks.die(f"claude binary '{bin_argv[0]}' not found (searched PATH via "
-                  f"shutil.which, PATHEXT honored on Windows) -- set "
-                  f"claude_bin in .agent-tasks/config.json or pass --claude-bin")
-    bin_argv[0] = resolved
+    bin_argv, is_batch = resolve_claude_bin(
+        list(bin_arg) if isinstance(bin_arg, list) else [bin_arg])
+    via = cfg.get("prompt_via", "auto")
+    use_stdin = {"argv": False, "stdin": True}.get(via, is_batch)
     cmd = [*bin_argv, "-p", "--permission-mode", pm] + base
     # The worker must always be able to run the queue CLI unattended (claim,
     # log, block, finish) -- pre-approve it under both quoting styles a worker
@@ -363,7 +391,7 @@ def claude_cmd(cfg, args, base):
     if model:
         cmd += ["--model", model]
     cmd += list(cfg["extra_args"])
-    return cmd, model, pm
+    return cmd, model, pm, use_stdin
 
 
 def _revert_preclaim(root, tid, agent):
@@ -434,12 +462,21 @@ def cmd_start(args):
         with open(procs.long_path(outbox), "w", encoding="utf-8") as f:
             f.write("")  # exists from birth; exactly one writer: the worker
         prompt = build_prompt(root, tid, agent, args.prompt_extra, cfg, outbox)
+        prompt_file = write_prompt_file(root, f"{worker_id}.txt", prompt)
         cfg["_root"] = root
-        cmd, model, pm = claude_cmd(cfg, args, ["--session-id", session_id])
-        cmd.append(prompt)
-
+        cmd, model, pm, use_stdin = claude_cmd(cfg, args,
+                                               ["--session-id", session_id])
         log_path = os.path.join(rt, "logs", f"{worker_id}.out")
-        proc = spawn(root, workdir, cmd, log_path, agent, outbox=outbox)
+        if use_stdin:
+            # batch shims (cmd.exe) truncate multi-line argv at the first
+            # newline -- the prompt travels on stdin, argv carries one line
+            cmd.append(STDIN_POINTER)
+            with open(procs.long_path(prompt_file), "rb") as pf:
+                proc = spawn(root, workdir, cmd, log_path, agent,
+                             outbox=outbox, stdin=pf)
+        else:
+            cmd.append(prompt)
+            proc = spawn(root, workdir, cmd, log_path, agent, outbox=outbox)
     except (Exception, SystemExit):
         _revert_preclaim(root, tid, agent)
         raise
@@ -642,11 +679,19 @@ def cmd_resume(args):
             f.write("")  # earlier content was folded into the note on exit
     prompt = args.prompt or CONTINUATION_PROMPT.format(
         tid=w["task"], note=tasks.note_path(root, w["task"]), outbox=outbox)
+    n = w.get("resumes", 0) + 1
+    prompt_file = write_prompt_file(root, f"{wid}.resume{n}.txt", prompt)
     cfg["_root"] = root
-    cmd, model, pm = claude_cmd(cfg, args, ["--resume", w["session_id"]])
-    cmd.append(prompt)
+    cmd, model, pm, use_stdin = claude_cmd(cfg, args, ["--resume", w["session_id"]])
     log_path = os.path.join(ensure_runtime(root), "logs", f"{wid}.out")
-    proc = spawn(root, w["cwd"], cmd, log_path, w["agent"], outbox=outbox)
+    if use_stdin:
+        cmd.append(STDIN_POINTER)
+        with open(procs.long_path(prompt_file), "rb") as pf:
+            proc = spawn(root, w["cwd"], cmd, log_path, w["agent"],
+                         outbox=outbox, stdin=pf)
+    else:
+        cmd.append(prompt)
+        proc = spawn(root, w["cwd"], cmd, log_path, w["agent"], outbox=outbox)
     with tasks.Lock(root):
         workers = load_workers(root)
         workers[wid].update(pid=proc.pid, resumes=workers[wid].get("resumes", 0) + 1,

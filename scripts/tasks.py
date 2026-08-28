@@ -64,6 +64,8 @@ CONFIG_DEFAULTS = {
     "allowed_tools": [],        # extra permission rules, e.g. ["Bash(pnpm test:*)"]
     "bootstrap": ".claude/task-worker-bootstrap.py",  # run via runner in fresh worktrees
     "claude_bin": "claude",     # string or argv list (e.g. ["cmd", "/c", "claude"])
+    "prompt_via": "auto",       # "argv" | "stdin" | "auto" (stdin iff the
+                                # resolved claude binary is a .cmd/.bat shim)
     "extra_args": [],           # extra claude CLI args, e.g. ["--verbose"]
 }
 

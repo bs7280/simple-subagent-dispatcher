@@ -26,6 +26,11 @@ print("FAKE-CLAUDE AGENT_TASKS_DIR:", os.environ.get("AGENT_TASKS_DIR", "unset")
 print("FAKE-CLAUDE AGENT:", os.environ.get("AGENT_TASKS_AGENT", "unset"))
 print("FAKE-CLAUDE CWD:", os.path.realpath(os.getcwd()))
 print("FAKE-CLAUDE CLAUDECODE:", os.environ.get("CLAUDECODE", "unset"))
+data = sys.stdin.read()
+prompt = data if data.strip() else (sys.argv[-1] if len(sys.argv) > 1 else "")
+print("FAKE-CLAUDE PROMPT-VIA:", "stdin" if data.strip() else "argv")
+lines = [l for l in prompt.splitlines() if l.strip()]
+print("FAKE-CLAUDE LAST-LINE:", lines[-1] if lines else "(empty)")
 sys.stdout.flush()
 ob = os.environ.get("AGENT_TASKS_OUTBOX")
 
@@ -180,6 +185,9 @@ def run_all(tmp):
         fail("resume used wrong session id")
     if not os.path.isfile(ob1):
         fail("resume should recreate the outbox (folded away on exit)")
+    if not os.path.isfile(os.path.join(repo, ".agent-tasks", "runtime",
+                                       "prompts", f"{wid}.resume1.txt")):
+        fail("resume should write a durable continuation-prompt file")
 
     if f"stopped {wid}" not in disp("stop", wid).stdout:
         fail("stop output")
@@ -197,6 +205,32 @@ def run_all(tmp):
     # worker resolution by task id and by unique prefix
     disp("wait", t1, check=False)
     disp("wait", wid[:12], check=False)
+
+    # ---- multi-line prompt integrity (the cmd.exe truncation bug) ----
+    # A marker on line 1 false-passes -- that is exactly how the bug hid.
+    marker = "XYZZY-4242"
+    extra = "\n".join([f"filler instruction line {i}" for i in range(1, 37)]
+                      + [f"Your reply must contain the marker word {marker}."])
+    for via in ("argv", "stdin"):
+        set_cfg(prompt_via=via)
+        tp = tasksc("create", f"Prompt integrity {via}").stdout.split()[1]
+        wp = started_id(disp("start", tp, "--prompt-extra", extra))
+        disp("wait", wp, check=False)
+        log = log_text(wp)
+        if f"FAKE-CLAUDE PROMPT-VIA: {via}" not in log:
+            fail(f"prompt should travel via {via}:\n{log}")
+        last = [l for l in log.splitlines() if "FAKE-CLAUDE LAST-LINE:" in l][-1]
+        if marker not in last:
+            fail(f"prompt truncated before its last line ({via}): {last}")
+        pfile = os.path.join(repo, ".agent-tasks", "runtime", "prompts",
+                             f"{wp}.txt")
+        if not os.path.isfile(pfile):
+            fail(f"durable prompt file missing ({via})")
+        with open(pfile, encoding="utf-8") as f:
+            ptext = f.read()
+        if marker not in ptext or len(ptext.splitlines()) < 38:
+            fail(f"durable prompt file incomplete ({via})")
+    set_cfg()
 
     # ---- auto-doctor on exit: hand-edited note surfaces in wait ----
     td = tasksc("create", "Doctor bait").stdout.split()[1]

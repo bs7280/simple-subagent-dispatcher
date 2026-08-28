@@ -14,10 +14,12 @@ import subprocess
 WINDOWS = os.name == "nt"
 
 
-def spawn(cmd, cwd, env, stdout):
-    """Start a detached process in its own group/session: stdin closed,
-    stderr folded into stdout (an open file object), survives the parent."""
-    kwargs = dict(cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+def spawn(cmd, cwd, env, stdout, stdin=None):
+    """Start a detached process in its own group/session: stdin bound to the
+    given open file handle (or closed when None), stderr folded into stdout
+    (an open file object), survives the parent."""
+    kwargs = dict(cwd=cwd, env=env,
+                  stdin=stdin if stdin is not None else subprocess.DEVNULL,
                   stdout=stdout, stderr=subprocess.STDOUT)
     if WINDOWS:
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP

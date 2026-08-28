@@ -59,8 +59,15 @@ you want the dispatcher) anywhere; zero dependencies (Python ≥ 3.8).
 - `claude_bin` may be a string or an argv list, and is resolved through
   `shutil.which` at spawn time — on Windows the claude CLI is an npm shim
   (`claude.cmd`), which plain `Popen` can't find; `which` honors `PATHEXT`.
-  An unresolvable binary fails fast with the fix named (config `claude_bin`
-  or `--claude-bin`), and the pre-claim is reverted.
+  A `.cmd`/`.bat` result is **unwrapped to a sibling `.exe`** when one exists;
+  when the binary is still a batch file, the multi-line worker prompt does
+  **not** ride argv (cmd.exe truncates argv at the first newline — a bug that
+  hides, because line 1 survives): it is piped on **stdin** from a durable
+  prompt file, with a one-line argv pointer. Prompt files are written to
+  `.agent-tasks/runtime/prompts/<worker-id>.txt` for *every* spawn and resume
+  (audit + resume trail), and `prompt_via` (`auto`/`argv`/`stdin`) can force
+  either path. An unresolvable binary fails fast with the fix named, and the
+  pre-claim is reverted.
 
 ## Quickstart
 
