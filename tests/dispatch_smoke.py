@@ -93,6 +93,18 @@ def run_all(tmp):
     # CLAUDECODE set on purpose: the dispatcher must strip it from workers
     env = {**os.environ, "CLAUDECODE": "1"}
     env.pop("AGENT_TASKS_DIR", None)
+    # transcripts are looked up under CLAUDE_CONFIG_DIR/projects first: the
+    # test plants fake ones there instead of touching ~/.claude
+    env["CLAUDE_CONFIG_DIR"] = os.path.join(tmp, "claude-config")
+    os.makedirs(os.path.join(env["CLAUDE_CONFIG_DIR"], "projects", "-fake-cwd"))
+    fixture = os.path.join(HERE, "fixtures", "worker-transcript.jsonl")
+
+    def plant_transcript(wid):
+        w = next(x for x in json.loads(disp("list", "--json").stdout) if x["id"] == wid)
+        dst = os.path.join(env["CLAUDE_CONFIG_DIR"], "projects", "-fake-cwd",
+                           f"{w['session_id']}.jsonl")
+        shutil.copy(fixture, dst)
+        return dst
 
     def sh(cmd, check=True, cwd=repo):
         res = subprocess.run(cmd, cwd=cwd, env=env, capture_output=True, text=True)
@@ -545,6 +557,24 @@ def run_all(tmp):
     w = next(x for x in json.loads(disp("list", "--json").stdout) if x["id"] == wv)
     if w.get("remote") != "tracker://item/7" or os.path.realpath(w.get("workspace", "")) != os.path.realpath(ws):
         fail(f"list --json should carry remote + workspace: {w}")
+    # ---- activity: empty until a transcript exists, then transcript-derived ----
+    if recs[1]["payload"].get("activity", {}).get("transcript") is not None \
+            or recs[1]["payload"]["activity"]["payload_version"] != 1:
+        fail(f"start sync should carry an empty activity block: {recs[1]['payload'].get('activity')}")
+    if w["activity"]["transcript"] is not None or "activity_state" in w:
+        fail(f"list --json: empty activity, no cursor leak: {w}")
+    tpath = plant_transcript(wv)
+    st = json.loads(disp("status", wv, "--json").stdout)
+    act = st["activity"]
+    if (st["id"] != wv or st["state"] != "running" or os.path.realpath(act["transcript"]) != os.path.realpath(tpath)
+            or act["turns"] != 3 or act["usage"]["output"] != 1467 or act["last_tool"]["name"] != "Bash"
+            or act["model"] != "claude-sonnet-5" or not act["cost_usd_estimated"]):
+        fail(f"status --json should return the transcript-derived block: {st}")
+    human = disp("status", wv).stdout
+    if "3 turns" not in human or "est. cost" not in human or "last tool:  Bash" not in human:
+        fail(f"status should print the digest: {human}")
+    if "3 turns" not in disp("list").stdout:
+        fail("list should show the one-line activity digest")
 
     res = disp("wait", wv, check=False)
     if res.returncode != 0:
@@ -565,6 +595,12 @@ def run_all(tmp):
     if (xp["outcome"] != "review" or xp["task"]["status"] != "review"
             or not xp["outbox"].endswith(".folded.md") or not os.path.isfile(xp["outbox"])):
         fail(f"exited payload should carry the outcome and the folded outbox: {xp}")
+    if xp["activity"]["turns"] != 3 or xp["activity"]["cost_usd_estimated"] is None \
+            or "activity_state" in xp["worker"]:
+        fail(f"exited payload should carry the final activity block: {xp['activity']}")
+    running_acts = [r["payload"]["activity"]["turns"] for r in recs if r["payload"]["phase"] == "running"]
+    if 3 not in running_acts:
+        fail(f"running ticks should carry activity once the transcript exists: {running_acts}")
     if "midway" not in open(xp["outbox"], encoding="utf-8").read():
         fail("folded outbox passed to the hook should hold the worker's prose")
     if not os.path.isfile(os.path.join(ws, "notes", "report.md")):

@@ -38,6 +38,7 @@ import time
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import activity  # noqa: E402  -- transcript-derived worker activity, same directory
 import procs  # noqa: E402  -- cross-platform process shim, same directory
 import tasks  # noqa: E402  -- the queue CLI, same directory
 
@@ -163,9 +164,33 @@ def cli_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks.py")
 
 
-def find_transcript(session_id):
-    hits = glob.glob(os.path.expanduser(f"~/.claude/projects/*/{session_id}.jsonl"))
-    return max(hits, key=os.path.getmtime) if hits else None
+find_transcript = activity.find_transcript  # CLAUDE_CONFIG_DIR/projects, then ~/.claude
+
+
+def refresh_activity(root, wid, cfg=None):
+    """The worker's transcript-derived activity block (see activity.py),
+    brought up to date: only the bytes appended since the last look are
+    parsed, and the cursor + aggregates persist on the registry entry under
+    the queue lock, so a tick on a multi-megabyte transcript costs one stat.
+    Unknown worker, or no transcript yet -> an empty block (transcript: null)."""
+    cfg = cfg or load_config(root)
+    prices = cfg.get("prices") or {}
+    with tasks.Lock(root):
+        workers = load_workers(root)
+        w = workers.get(wid)
+        if w is None:
+            return activity.block(None, None, prices)
+        path = w.get("transcript")
+        if not path or not os.path.isfile(procs.long_path(path)):
+            path = find_transcript(w.get("session_id") or "")
+        state = w.get("activity_state")
+        if not path:
+            return activity.block(state, None, prices)
+        state, changed = activity.scan(procs.long_path(path), state)
+        if changed or path != w.get("transcript"):
+            w["transcript"], w["activity_state"] = path, state
+            save_workers(root, workers)
+    return activity.block(state, path, prices)
 
 
 # ---------------------------------------------------------------- prompts
@@ -274,7 +299,10 @@ def build_prompt(root, tid, agent, extra, cfg, outbox, workspace):
 #    "queue": <.agent-tasks path>, "repo": <repo path>,
 #    "task": {<index entry: id, title, status, remote, ...>},
 #    "note": <task note path>, "outbox": <outbox path>,
-#    "workspace": <workspace dir>, "worker": {<registry entry + id>}}
+#    "workspace": <workspace dir>, "worker": {<registry entry + id>},
+#    "activity": {<transcript-derived block, activity.py: last tool/text,
+#                 turns, usage, estimated cost -- empty until the session's
+#                 transcript exists; bridges read this, never the raw log>}}
 #
 # seed runs before the worker spawns (cwd = repo); a non-zero exit aborts the
 # dispatch and reverts the pre-claim -- if you configured a seed, you meant
@@ -282,12 +310,14 @@ def build_prompt(root, tid, agent, extra, cfg, outbox, workspace):
 # log, never a blocked fold. Hook output is appended to the worker's spawn
 # log so `watch` shows it beside the session.
 
-def hook_payload(root, event, phase, wid, w, outcome=None, outbox=None, changed=True):
+def hook_payload(root, event, phase, wid, w, outcome=None, outbox=None, changed=True,
+                 cfg=None):
     index = tasks.load_index(root)
     tid = w["task"]
     task = tasks.task_json(index, tid) if tid in index["tasks"] else {"id": tid}
     worker = dict(w)
     worker["id"] = wid
+    worker.pop("activity_state", None)  # the cursor is ours; the block below is theirs
     return {
         "event": event, "phase": phase, "outcome": outcome, "changed": changed,
         "queue": root, "repo": repo_of(root),
@@ -295,6 +325,7 @@ def hook_payload(root, event, phase, wid, w, outcome=None, outbox=None, changed=
         "outbox": outbox or w.get("outbox") or outbox_path(root, wid),
         "workspace": w.get("workspace") or workspace_path(root, wid),
         "worker": worker,
+        "activity": refresh_activity(root, wid, cfg),
     }
 
 
@@ -332,7 +363,7 @@ def sync_worker(root, cfg, wid, w, phase, outcome=None, outbox=None, changed=Tru
     summary for the caller to print, or None when no hook is configured."""
     if not cfg.get("sync_hook"):
         return None
-    payload = hook_payload(root, "sync", phase, wid, w, outcome, outbox, changed)
+    payload = hook_payload(root, "sync", phase, wid, w, outcome, outbox, changed, cfg=cfg)
     ok, out = run_hook(root, cfg, "sync_hook", payload, wid)
     first = out.splitlines()[0] if out else ""
     if ok:
@@ -694,7 +725,7 @@ def cmd_start(args):
                  "permission_mode": pm, "agent": agent, "started": tasks.now(),
                  "outbox": outbox, "workspace": workspace, "resumes": 0}
         if cfg.get("seed_hook"):
-            payload = hook_payload(root, "seed", "start", worker_id, entry)
+            payload = hook_payload(root, "seed", "start", worker_id, entry, cfg=cfg)
             ok, out = run_hook(root, cfg, "seed_hook", payload, worker_id)
             if not ok:
                 tasks.die(f"seed_hook failed for {tid} -- not spawning "
@@ -776,6 +807,8 @@ def cmd_list(args):
             w["task_status"] = index["tasks"].get(w["task"], {}).get("status")
             w["remote"] = index["tasks"].get(w["task"], {}).get("remote")
             w.setdefault("workspace", workspace_path(root, wid))
+            w.pop("activity_state", None)
+            w["activity"] = refresh_activity(root, wid, cfg)
             out.append(w)
         print(json.dumps(out, indent=2))
         return
@@ -793,6 +826,58 @@ def cmd_list(args):
         print(line)
         if state == "running" and w.get("outbox"):
             print(f"{'':<24} outbox: {w['outbox']}")
+        act = refresh_activity(root, wid, cfg)
+        if act["transcript"]:
+            print(f"{'':<24} {activity.one_liner(act)}")
+
+
+def cmd_status(args):
+    """One worker, right now: process state, task status, and what its
+    transcript says it has been doing -- last tool, last words, API turns,
+    token usage, estimated cost. `--json` is the same block a sync hook
+    receives as `activity`, beside the registry facts."""
+    root = tasks.find_dir()
+    cfg = load_config(root)
+    workers = load_workers(root)
+    wid = resolve_worker(root, workers, args.worker)
+    w = workers[wid]
+    maybe_fold(root, workers, wid, cfg)  # any observation of an exit folds
+    act = refresh_activity(root, wid, cfg)
+    index = tasks.load_index(root)
+    task = index["tasks"].get(w["task"], {})
+    facts = {"id": wid, "task": w["task"], "state": worker_state(w),
+             "task_status": task.get("status"), "pid": w["pid"],
+             "session_id": w["session_id"], "model": w.get("model"),
+             "agent": w.get("agent"), "cwd": w.get("cwd"),
+             "worktree_branch": w.get("worktree_branch"), "started": w.get("started"),
+             "resumes": w.get("resumes", 0), "outbox": w.get("outbox"),
+             "workspace": w.get("workspace") or workspace_path(root, wid),
+             "remote": task.get("remote"), "activity": act}
+    if args.json:
+        print(json.dumps(facts, indent=2))
+        return
+    print(f"{wid}  {facts['state']}  pid {w['pid']}  {w['task']} "
+          f"({task.get('status', '?')})  started {w.get('started')}"
+          + (f"  resumes {facts['resumes']}" if facts["resumes"] else ""))
+    print(f"  session:    {w['session_id']}")
+    print(f"  transcript: {act['transcript'] or '(not found yet)'}")
+    print(f"  {activity.one_liner(act)}")
+    if act["last_tool"]:
+        lt = act["last_tool"]
+        print(f"  last tool:  {lt['name']}" + (f": {lt['target']}" if lt.get("target") else "")
+              + (f"   at {lt['ts']}" if lt.get("ts") else ""))
+    if act["last_text"]:
+        print(f"  last text:  {act['last_text']}")
+    us = act["usage"]
+    print(f"  usage:      input {us['input']:,}  output {us['output']:,}  "
+          f"cache write {us['cache_write']:,} (1h: {us['cache_write_1h']:,})  "
+          f"cache read {us['cache_read']:,}   model {act['model'] or '?'}")
+    if act["cost_usd_estimated"] is not None:
+        print(f"  est. cost:  ${act['cost_usd_estimated']:.4f}  (price table: {act['pricing']})")
+    elif act["model"]:
+        print(f"  est. cost:  unknown -- no prices for {act['model']}; add config "
+              f"\"prices\": {{\"{act['model']}\": {{input, output, cache_read, "
+              f"cache_write_5m, cache_write_1h}}}} (USD per million tokens)")
 
 
 # ---------------------------------------------------------------- watch
@@ -1193,6 +1278,14 @@ def main():
     p = sub.add_parser("list", help="list workers; flags [NEEDS-RESUME]")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("status", help="one worker now: state, task, and its "
+                                      "transcript-derived activity (last tool/"
+                                      "text, turns, usage, est. cost)")
+    p.add_argument("worker", help="worker id, unique prefix, or task id")
+    p.add_argument("--json", action="store_true",
+                   help="registry facts + the same `activity` block hooks get")
+    p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("watch", help="show a worker's transcript events")
     p.add_argument("worker", help="worker id, unique prefix, or task id")

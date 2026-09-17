@@ -130,7 +130,9 @@ Options, by weight:
     denied-not-prompted, so thin allowlists show up as denied actions in the
     transcript, not hangs.
   - `dispatch list` — all workers, with `[NEEDS-RESUME]` on any that exited
-    while its task was still in_progress.
+    while its task was still in_progress, and a one-line activity digest
+    (turns, tokens, est. cost, last tool) from each transcript.
+  - `dispatch status <worker>` — that digest in full for one worker.
   - `dispatch watch <worker> --follow` — tail the worker's real transcript.
   - `dispatch wait <worker>` — block until it exits (exit 3 = died mid-task).
   - `dispatch resume <worker>` — continue a dead worker's session; context and
@@ -189,6 +191,9 @@ Reads, cheapest first:
   delta, not the world). `--actionable` narrows it to decisions.
 - `tasks board` — one-screen state; also prints the cursor and who is
   supervising.
+- `dispatch status WORKER` — one worker right now: what its transcript says
+  it last did (tool + target, last words), API turns, tokens, estimated
+  cost. Cheaper than `watch` and answers "is it stuck or just slow?".
 - `tasks show TASK-042` — when you are about to act on that one task. The
   note's Work log is the worker's live narration; read it before concluding a
   worker is stuck.

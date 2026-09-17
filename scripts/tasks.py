@@ -89,6 +89,9 @@ CONFIG_DEFAULTS = {
     "seed_hook": None,          # before spawn: materialize remote context into
                                 # the worker's workspace/seed/ (failure aborts
                                 # the dispatch and reverts the pre-claim)
+    "prices": {},               # per-model USD/MTok overrides for the dispatcher's
+                                # cost estimate: {"<model id>": {input, output,
+                                # cache_read, cache_write_5m, cache_write_1h}}
     "sync_hook": None,          # at spawn, every sync_interval_seconds while
                                 # supervised (wait/watch), and at fold with the
                                 # outcome: push outbox + workspace onward
@@ -595,6 +598,11 @@ Machine-managed task queue shared by planner and worker agents
   outcome; both get a JSON payload on stdin; `hook_timeout_seconds` 120).
   A task's `remote` (`create --remote`, `tasks remote ID [REF]`) is an
   opaque string only those hooks interpret.
+  `prices` ({{}} -- per-model USD-per-million-token overrides for the
+  dispatcher's estimated cost, shipped in the sync payload's `activity`
+  block and shown by `dispatch status`: {{"<model id>": {{"input", "output",
+  "cache_read", "cache_write_5m", "cache_write_1h"}}}}; unknown models get a
+  null cost and raw usage).
 - `config.local.json` -- optional machine-local overlay, merged key-by-key
   over `config.json` (gitignored by init). Any key may be overridden; put
   machine facts here (claude_bin path, runner), project policy in

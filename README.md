@@ -148,7 +148,8 @@ lacks:
 | command | what it does |
 |---|---|
 | `start TASK-042 [--worktree\|--in-place] [--model] [--agent-name] [--force]` (alias: `run`) | **pre-claims the task atomically, then** spawns a worker with a ready-made prompt (verify assignment → work → log → heartbeat → finish to `review`) |
-| `list [--json]` | all workers, with each running worker's outbox path; flags `[NEEDS-RESUME]` on any that exited while its task was still `in_progress` |
+| `list [--json]` | all workers, with each running worker's outbox path and a one-line activity digest from its transcript (turns, tokens, est. cost, last tool); flags `[NEEDS-RESUME]` on any that exited while its task was still `in_progress` |
+| `status WORKER [--json]` | one worker now: state, task status, and its transcript-derived **activity** — last tool + target, last words, API turns, token usage, estimated cost (`--json`: the registry facts plus the same `activity` block the sync hook receives) |
 | `watch WORKER [--follow] [--tail N] [--from-start]` | one merged timeline from both evidence streams — `[session]` transcript events beside `[spawn]` log lines (permission warnings, CLI errors), so a deny-rule warning shows up next to the tool call it explains; degrades to spawn-only when the transcript can't be located, and picks the transcript up live if it appears |
 | `wait WORKER [--timeout]` | block until it exits — exit 3 = died mid-task, 2 = timeout; on exit it folds the outbox and runs `tasks doctor`, printing findings (exit code stays task-status-driven) |
 | `resume WORKER [--prompt]` | continue a dead worker's session (default continuation prompt re-orients it: re-read task, check `git status`, carry on) |
@@ -197,6 +198,7 @@ project's default in **`.agent-tasks/config.json`** (all keys optional):
   "worktree_root": null,
   "model": null,
   "permission_mode": "acceptEdits",
+  "prices": {},
   "allowed_tools": [],
   "bootstrap": ".claude/task-worker-bootstrap.py",
   "claude_bin": "claude",
@@ -526,11 +528,33 @@ and moves the integration to the dispatcher side, behind two hooks:
    "note": "<task note path>", "outbox": "<outbox path>",
    "workspace": "<workspace dir>",
    "worker": {"id": "…", "agent": "…", "session_id": "…", "model": "…",
-              "cwd": "…", "worktree_branch": "…", "started": "…", "pid": 0}}
+              "cwd": "…", "worktree_branch": "…", "started": "…", "pid": 0},
+   "activity": {"payload_version": 1, "transcript": "<session jsonl path> | null",
+                "last_event_ts": "2026-09-17T22:24:40Z",
+                "last_tool": {"name": "Bash", "target": "pnpm test", "ts": "…"} | null,
+                "last_text": "Done: typecheck is clean…" | null,
+                "turns": 12, "tool_calls": 31, "model": "claude-sonnet-5",
+                "usage": {"input": 6, "output": 46845, "cache_write": 171962,
+                          "cache_write_1h": 171962, "cache_read": 10232369},
+                "cost_usd_estimated": 3.19, "pricing": "claude-sonnet-5"}}
   ```
 
   Hook stdout/stderr lands in the worker's spawn log, so `watch` shows a
   failed push beside the session activity it relates to.
+- **`activity`** is what the worker's own session transcript says it has
+  been doing — the dispatcher reads the jsonl Claude Code writes live and
+  ships one normalized block, so a bridge never parses the raw log. It is on
+  every sync payload (empty, `transcript: null`, until the session has
+  written one). Reads are incremental (a byte cursor per worker in
+  `runtime/workers.json`; only appended lines are parsed) and usage is
+  counted **once per message id** — the transcript repeats a message's
+  usage on every content-block line, so a naive sum of lines roughly
+  doubles a tool-heavy run. `cost_usd_estimated` comes from a built-in
+  per-model price table (Anthropic first-party rates; cache reads 0.1×
+  input, cache writes 1.25× for the 5-minute TTL and 2× for the 1-hour TTL,
+  which the transcript reports separately); config `prices` overrides or
+  extends it per model id, and an unknown model ships `null` cost with the
+  raw usage intact. `dispatch status WORKER --json` returns the same block.
 
 Machine paths belong in `config.local.json`, the gitignored overlay:
 
