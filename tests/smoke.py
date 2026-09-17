@@ -751,13 +751,50 @@ def test_handoff(tmp):
         fail(f"unexpected watcher exit {p.returncode}: {out}")
 
 
+def test_remote(tmp):
+    """`remote` is an opaque handle for the project's seed/sync hooks: set at
+    create or later, mirrored into the note frontmatter (display-only, like
+    status), cleared with '-', and invisible to the rest of the queue."""
+    q = Queue(tmp)
+    q.run("init")
+    t = q.out("create", "Linked", "--remote", "repos.x.llpm.tasks.TASK-012").split()[1]
+    if q.js("show", t, "--json")["remote"] != "repos.x.llpm.tasks.TASK-012":
+        fail("create --remote not in index")
+    fm = q.note_text(t).split("---")[1]
+    if "remote: repos.x.llpm.tasks.TASK-012" not in fm:
+        fail("create --remote not mirrored into frontmatter")
+    if q.out("remote", t).strip() != "repos.x.llpm.tasks.TASK-012":
+        fail("remote get")
+    if q.js("remote", t, "--json") != {"id": t, "remote": "repos.x.llpm.tasks.TASK-012"}:
+        fail("remote get --json")
+    q.run("remote", t, "https://issues.example/42", "--agent", "planner")
+    if q.js("show", t, "--json")["remote"] != "https://issues.example/42":
+        fail("remote set")
+    fm = q.note_text(t).split("---")[1]
+    if "remote: https://issues.example/42" not in fm or "TASK-012" in fm:
+        fail(f"remote set should replace the frontmatter line: {fm}")
+    ev = q.js("since", "--task", t, "--json")["events"]
+    if not any(e["kind"] == "remote" and e.get("remote") == "https://issues.example/42" for e in ev):
+        fail("remote change should be journaled")
+    q.run("remote", t, "-")
+    if "remote" in q.js("show", t, "--json") or "remote:" in q.note_text(t).split("---")[1]:
+        fail("remote clear")
+    if q.run("remote", t, check=False).returncode != 1:
+        fail("remote get on a bare task should exit 1")
+    t2 = q.out("create", "Plain").split()[1]
+    if "remote" in q.js("show", t2, "--json") or "remote:" in q.note_text(t2).split("---")[1]:
+        fail("a task without --remote must carry no remote field at all")
+    if q.run("doctor", check=False).returncode != 0:
+        fail("remote frontmatter must not trip doctor")
+
+
 def main():
     for test in (test_lifecycle, test_leases, test_tiers, test_resources,
                  test_doctor, test_mutex, test_concurrent_logs,
                  test_utf8_discipline, test_note_append, test_config_overlay,
                  test_journal, test_await_wakes_only_on_decisions,
                  test_await_quiet_and_blocked, test_supervisor_lease,
-                 test_handoff):
+                 test_handoff, test_remote):
         tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
         try:
             test(tmp)

@@ -81,6 +81,20 @@ CONFIG_DEFAULTS = {
     "prompt_via": "auto",       # "argv" | "stdin" | "auto" (stdin iff the
                                 # resolved claude binary is a .cmd/.bat shim)
     "extra_args": [],           # extra claude CLI args, e.g. ["--verbose"]
+    # -- remote tracker bridge (see README "Linking a remote tracker") --
+    # Both hooks are argv lists run with cwd = the repo and a JSON payload on
+    # stdin describing the task, the worker, its outbox and workspace. The
+    # queue never learns what the remote is: `remote` on a task is an opaque
+    # string only the hooks interpret (a vault stem, a Jira key, an issue URL).
+    "seed_hook": None,          # before spawn: materialize remote context into
+                                # the worker's workspace/seed/ (failure aborts
+                                # the dispatch and reverts the pre-claim)
+    "sync_hook": None,          # at spawn, every sync_interval_seconds while
+                                # supervised (wait/watch), and at fold with the
+                                # outcome: push outbox + workspace onward
+                                # (best-effort: failures warn, never block)
+    "sync_interval_seconds": 120,
+    "hook_timeout_seconds": 120,
 }
 
 
@@ -346,7 +360,7 @@ NOTE_TEMPLATE = """---
 id: {tid}
 title: {title}
 status: open
-created: {ts}
+created: {ts}{remote_line}
 ---
 
 # {tid} -- {title}
@@ -368,14 +382,34 @@ _(worker scratch space -- findings, decisions, open questions)_
 """
 
 
-def write_note(root, tid, title, body, criteria, ts):
+def write_note(root, tid, title, body, criteria, ts, remote=None):
     text = NOTE_TEMPLATE.format(
         tid=tid, title=title, ts=ts,
+        remote_line=f"\nremote: {remote}" if remote else "",
         body=body or "_(no description yet -- planner should fill this in)_",
         criteria=criteria or "_(none specified)_",
     )
     with open(note_path(root, tid), "w", encoding="utf-8") as f:
         f.write(text)
+
+
+def set_note_remote(root, tid, remote):
+    """Mirror the index's `remote` into the note frontmatter (display-only,
+    like `status:` -- the index is the source of truth)."""
+    path = note_path(root, tid)
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return
+    m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
+    if not m:
+        return
+    fm = [ln for ln in m.group(1).split("\n") if not ln.startswith("remote:")]
+    if remote:
+        fm.append(f"remote: {remote}")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("---\n" + "\n".join(fm) + "\n---\n" + text[m.end():])
 
 
 def set_note_status(root, tid, status):
@@ -552,7 +586,14 @@ Machine-managed task queue shared by planner and worker agents
   Bash(...)/PowerShell(...) entries get their other-shell twin added
   automatically unless `expand_shell_rules` is false),
   `bootstrap` (".claude/task-worker-bootstrap.py" -- a Python script),
-  `claude_bin` ("claude" -- string or argv list), `extra_args` ([]).
+  `claude_bin` ("claude" -- string or argv list), `extra_args` ([]),
+  `seed_hook` / `sync_hook` (null -- argv lists bridging a remote tracker:
+  seed runs before a worker spawns and fills its workspace `seed/`; sync
+  pushes the worker's outbox + workspace onward at spawn, every
+  `sync_interval_seconds` (120) while supervised, and at fold with the
+  outcome; both get a JSON payload on stdin; `hook_timeout_seconds` 120).
+  A task's `remote` (`create --remote`, `tasks remote ID [REF]`) is an
+  opaque string only those hooks interpret.
 - `config.local.json` -- optional machine-local overlay, merged key-by-key
   over `config.json` (gitignored by init). Any key may be overridden; put
   machine facts here (claude_bin path, runner), project policy in
@@ -632,13 +673,53 @@ def cmd_create(args):
         resources = [r.strip() for r in (args.resources or "").split(",") if r.strip()]
         if resources:
             entry["resources"] = resources
+        if args.remote:
+            entry["remote"] = args.remote
         index["tasks"][tid] = entry
         save_index(root, index)
-        write_note(root, tid, args.title, args.body, args.criteria, ts)
+        write_note(root, tid, args.title, args.body, args.criteria, ts,
+                   remote=args.remote)
         append_log(root, tid, agent, "created",
                    kind="create", data={"title": args.title,
-                                        "priority": args.priority})
+                                        "priority": args.priority,
+                                        **({"remote": args.remote} if args.remote else {})})
     print(f"created {tid}  {os.path.relpath(note_path(root, tid))}")
+
+
+def cmd_remote(args):
+    """Get or set a task's remote reference: the opaque handle the project's
+    seed/sync hooks use to bridge an outside tracker (a vault stem, an issue
+    URL, a Jira key). The queue itself never interprets it."""
+    root = find_dir()
+    if args.ref is None:
+        index = load_index(root)
+        tid = resolve_id(index, args.id)
+        remote = index["tasks"][tid].get("remote")
+        if args.json:
+            print(json.dumps({"id": tid, "remote": remote}))
+        elif remote:
+            print(remote)
+        else:
+            print(f"{tid} has no remote", file=sys.stderr)
+            sys.exit(1)
+        return
+    with Lock(root):
+        index = load_index(root)
+        tid = resolve_id(index, args.id)
+        task = index["tasks"][tid]
+        ref = args.ref.strip()
+        if ref in ("", "-", "none"):
+            task.pop("remote", None)
+            ref = None
+        else:
+            task["remote"] = ref
+        task["updated"] = now()
+        save_index(root, index)
+        set_note_remote(root, tid, ref)
+        append_log(root, tid, default_agent(args.agent),
+                   f"remote: {ref or '(cleared)'}", kind="remote",
+                   data={"remote": ref})
+    print(f"{tid} remote: {ref or '(cleared)'}")
 
 
 def cmd_list(args):
@@ -1807,8 +1888,19 @@ def main():
     p.add_argument("--model", help="pin the model this task needs (e.g. opus)")
     p.add_argument("--resources", help="comma-separated exclusive-resource tags "
                                        "(e.g. db-migrations,browser)")
+    p.add_argument("--remote", help="opaque reference to this task in an outside "
+                                    "tracker, for the project's seed/sync hooks "
+                                    "(e.g. a vault stem or an issue URL)")
     agent_flag(p)
     p.set_defaults(func=cmd_create)
+
+    p = sub.add_parser("remote", help="print or set a task's remote-tracker "
+                                      "reference (set '-' to clear)")
+    p.add_argument("id")
+    p.add_argument("ref", nargs="?", help="new reference; omit to print the current one")
+    p.add_argument("--json", action="store_true")
+    agent_flag(p)
+    p.set_defaults(func=cmd_remote)
 
     p = sub.add_parser("list", help="list tasks (hides done/cancelled unless --all)")
     p.add_argument("--status", help="filter: comma-separated statuses")

@@ -125,6 +125,40 @@ def outbox_path(root, wid):
     return os.path.join(root, RUNTIME, "outbox", f"{wid}.md")
 
 
+WORKSPACE_SUBDIRS = ("seed", "notes", "attachments")
+
+
+def workspace_path(root, wid):
+    """The worker's private directory, beside its outbox: seed/ (context
+    materialized for it before spawn), notes/ (its longer write-ups),
+    attachments/ (screenshots, artifacts). Under runtime/, so it is outside
+    the queue-write fence and never committed."""
+    return os.path.join(root, RUNTIME, "outbox", wid)
+
+
+def ensure_workspace(root, wid):
+    ws = workspace_path(root, wid)
+    for sub in WORKSPACE_SUBDIRS:
+        os.makedirs(procs.long_path(os.path.join(ws, sub)), exist_ok=True)
+    return ws
+
+
+def workspace_mtime(root, wid, w=None):
+    """Newest mtime across the outbox and workspace tree -- the cheap
+    "did the worker write anything since we last synced" probe."""
+    latest = 0.0
+    paths = [(w or {}).get("outbox") or outbox_path(root, wid)]
+    ws = workspace_path(root, wid)
+    for base, _dirs, files in os.walk(ws):
+        paths += [os.path.join(base, f) for f in files]
+    for p in paths:
+        try:
+            latest = max(latest, os.path.getmtime(procs.long_path(p)))
+        except OSError:
+            pass
+    return latest
+
+
 def cli_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks.py")
 
@@ -150,8 +184,21 @@ Write progress notes, findings, and decisions there as you go, as plain
 markdown, with your ordinary file tools. It is yours alone -- nobody else
 writes to it -- and it is folded into the task note for you afterwards.
 
+YOUR WORKSPACE -- a directory that is yours alone:
+  {workspace}
+  seed/         context prepared for you before you started. Read it FIRST if
+                it is not empty: when seed/ticket.md exists, THAT is the real
+                spec and the task note is only a wrapper around it.
+  notes/        longer write-ups, one markdown file each (a test report, a
+                design note, a decision record). The outbox stays the running
+                journal; anything bigger than a few lines goes here.
+  attachments/  screenshots and other artifacts you produced or verified with.
+Everything in your outbox and workspace is collected and forwarded for you --
+to the task note, and to whatever tracker this queue is linked to.
+
 Queue state is read-only to you: never edit the task note, index.json, or
-anything else under {root}. Your outbox is the sanctioned place to write.
+anything else under {root}. Your outbox and workspace are the sanctioned
+places to write.
 
 When you finish, the LAST line of your outbox must be exactly one of:
   STATUS: review
@@ -178,19 +225,111 @@ Rules:
 
 CONTINUATION_PROMPT = """You are resuming an interrupted unattended task-worker session for {tid}.
 Re-read the task note ({note}) -- any earlier outbox content of yours was
-already folded into its Work log -- and your outbox ({outbox}). Check the
-working tree state (git status, git diff), then continue exactly where you
-left off, per your original instructions: progress goes in your outbox, and
-its LAST line must end up as the STATUS sentinel (STATUS: review, or
-STATUS: blocked: <what you need>). The task remains claimed for you; your
-supervisor keeps the claim alive."""
+already folded into its Work log -- your outbox ({outbox}) and your workspace
+({workspace}: seed/ is your context, notes/ and attachments/ are yours to
+write). Check the working tree state (git status, git diff), then continue
+exactly where you left off, per your original instructions: progress goes in
+your outbox, and its LAST line must end up as the STATUS sentinel
+(STATUS: review, or STATUS: blocked: <what you need>). The task remains
+claimed for you; your supervisor keeps the claim alive."""
 
 
-def build_prompt(root, tid, agent, extra, cfg, outbox):
+def build_prompt(root, tid, agent, extra, cfg, outbox, workspace):
     extra = f"\n\nAdditional instructions from the dispatcher:\n{extra}" if extra else ""
     return WORKER_PROMPT.format(cli=cli_path(), root=root, tid=tid, agent=agent,
                                 note=tasks.note_path(root, tid), outbox=outbox,
-                                run=runner_str(cfg), extra=extra)
+                                workspace=workspace, run=runner_str(cfg),
+                                extra=extra)
+
+
+# ---------------------------------------------------------------- hooks
+#
+# The bridge to an outside tracker is two argv hooks in config -- the queue
+# never learns what the remote is. Each hook gets ONE JSON document on stdin:
+#
+#   {"event": "seed"|"sync", "phase": "start"|"running"|"exited",
+#    "outcome": null | "review" | "blocked: <reason>" | "died" | "ended",
+#    "queue": <.agent-tasks path>, "repo": <repo path>,
+#    "task": {<index entry: id, title, status, remote, ...>},
+#    "note": <task note path>, "outbox": <outbox path>,
+#    "workspace": <workspace dir>, "worker": {<registry entry + id>}}
+#
+# seed runs before the worker spawns (cwd = repo); a non-zero exit aborts the
+# dispatch and reverts the pre-claim -- if you configured a seed, you meant
+# it. sync is best-effort everywhere: a failure is a warning in the spawn
+# log, never a blocked fold. Hook output is appended to the worker's spawn
+# log so `watch` shows it beside the session.
+
+def hook_payload(root, event, phase, wid, w, outcome=None, outbox=None):
+    index = tasks.load_index(root)
+    tid = w["task"]
+    task = tasks.task_json(index, tid) if tid in index["tasks"] else {"id": tid}
+    worker = dict(w)
+    worker["id"] = wid
+    return {
+        "event": event, "phase": phase, "outcome": outcome,
+        "queue": root, "repo": repo_of(root),
+        "task": task, "note": tasks.note_path(root, tid),
+        "outbox": outbox or w.get("outbox") or outbox_path(root, wid),
+        "workspace": w.get("workspace") or workspace_path(root, wid),
+        "worker": worker,
+    }
+
+
+def run_hook(root, cfg, key, payload, wid):
+    """Run config[key] (argv) with the payload on stdin. Returns (ok, text).
+    Never raises: a missing/crashing hook is reported, not propagated."""
+    argv = cfg.get(key)
+    if not argv:
+        return None, ""
+    argv = list(argv) if isinstance(argv, list) else [argv]
+    env = dict(os.environ)
+    env["AGENT_TASKS_DIR"] = root
+    env["AGENT_TASKS_HOOK"] = key
+    log_path = os.path.join(ensure_runtime(root), "logs", f"{wid}.out")
+    stamp = f"{payload['event']}/{payload['phase']}"
+    try:
+        res = subprocess.run(argv, cwd=repo_of(root), env=env,
+                             input=json.dumps(payload), capture_output=True,
+                             text=True, timeout=float(cfg.get("hook_timeout_seconds") or 120))
+        ok, out = res.returncode == 0, (res.stdout + res.stderr).strip()
+        if not ok:
+            out = f"exit {res.returncode}: {out}"
+    except subprocess.TimeoutExpired:
+        ok, out = False, f"timed out after {cfg.get('hook_timeout_seconds')}s"
+    except OSError as e:
+        ok, out = False, f"could not run {argv[0]}: {e}"
+    with open(procs.long_path(log_path), "a", encoding="utf-8") as f:
+        f.write(f"\n=== {tasks.now()} {key} {stamp} "
+                f"{'ok' if ok else 'FAILED'}\n{out}\n")
+    return ok, out
+
+
+def sync_worker(root, cfg, wid, w, phase, outcome=None, outbox=None):
+    """Fire the sync hook for one worker (best-effort). Returns a one-line
+    summary for the caller to print, or None when no hook is configured."""
+    if not cfg.get("sync_hook"):
+        return None
+    payload = hook_payload(root, "sync", phase, wid, w, outcome, outbox)
+    ok, out = run_hook(root, cfg, "sync_hook", payload, wid)
+    first = out.splitlines()[0] if out else ""
+    if ok:
+        return f"synced {wid} ({phase}" + (f", {outcome}" if outcome else "") + ")" \
+            + (f": {first}" if first else "")
+    return f"warning: sync_hook failed for {wid} ({phase}): {first}"
+
+
+def fold_outcome(root, w, applied):
+    """Translate a fold result into the outcome vocabulary the sync hook
+    sees: review | blocked: <reason> | died | ended."""
+    if applied == "review":
+        return "review"
+    if applied and applied.startswith("blocked:"):
+        return applied
+    task = tasks.load_index(root)["tasks"].get(w["task"], {})
+    if task.get("status") == "in_progress" and task.get("assignee") == w["agent"]:
+        return "died"  # exited without a sentinel while still holding the task
+    return "ended"
 
 
 SENTINEL = re.compile(r"^\s*status\s*:\s*(review|blocked)\b[:\s]*(.*?)\s*$", re.I)
@@ -270,12 +409,23 @@ def fold_outbox(root, wid, w):
     return applied
 
 
-def maybe_fold(root, workers, wid):
-    """Fold an exited worker's outbox, if it has one waiting."""
+def maybe_fold(root, workers, wid, cfg=None):
+    """Fold an exited worker's outbox, if it has one waiting -- and, exactly
+    once per fold, push the final state onward through the sync hook (the
+    fold archives the outbox, so a second observer finds nothing to fold and
+    fires nothing)."""
     w = workers[wid]
     if worker_state(w) == "running":
         return None
-    return fold_outbox(root, wid, w)
+    applied = fold_outbox(root, wid, w)
+    if applied is not None:
+        cfg = cfg or load_config(root)
+        outbox = (w.get("outbox") or outbox_path(root, wid))[:-3] + ".folded.md"
+        msg = sync_worker(root, cfg, wid, w, "exited",
+                          fold_outcome(root, w, applied), outbox=outbox)
+        if msg:
+            print(msg, file=sys.stderr if msg.startswith("warning") else sys.stdout)
+    return applied
 
 
 def report_doctor(root):
@@ -309,7 +459,8 @@ def heartbeat_interval(cfg):
 
 # ---------------------------------------------------------------- spawn
 
-def spawn(root, workdir, cmd, log_path, agent, outbox=None, stdin=None):
+def spawn(root, workdir, cmd, log_path, agent, outbox=None, stdin=None,
+          workspace=None):
     # Strip the parent session's CLAUDE_* env (CLAUDECODE, session id, child-
     # session marker, messaging socket, ...): a spawned worker that inherits it
     # is treated as a nested child session and loses the ability to self-approve
@@ -322,6 +473,8 @@ def spawn(root, workdir, cmd, log_path, agent, outbox=None, stdin=None):
     env["AGENT_TASKS_AGENT"] = agent
     if outbox:
         env["AGENT_TASKS_OUTBOX"] = outbox
+    if workspace:
+        env["AGENT_TASKS_WORKSPACE"] = workspace
     with open(procs.long_path(log_path), "ab") as logf:
         logf.write((f"\n=== {tasks.now()} spawn: " + " ".join(cmd[:-1])
                     + " <prompt>\n").encode())
@@ -502,30 +655,44 @@ def cmd_start(args):
         outbox = outbox_path(root, worker_id)
         with open(procs.long_path(outbox), "w", encoding="utf-8") as f:
             f.write("")  # exists from birth; exactly one writer: the worker
-        prompt = build_prompt(root, tid, agent, args.prompt_extra, cfg, outbox)
-        prompt_file = write_prompt_file(root, f"{worker_id}.txt", prompt)
+        workspace = ensure_workspace(root, worker_id)
         cfg["_root"] = root
         cmd, model, pm, use_stdin = claude_cmd(cfg, args,
                                                ["--session-id", session_id])
         log_path = os.path.join(rt, "logs", f"{worker_id}.out")
+        # The registry entry exists before the spawn so the seed hook sees
+        # the same worker facts (id, session, cwd, branch, model) the sync
+        # hook will see later -- one shape, both directions.
+        entry = {"task": tid, "session_id": session_id, "pid": None,
+                 "cwd": workdir, "worktree_branch": branch, "model": model,
+                 "permission_mode": pm, "agent": agent, "started": tasks.now(),
+                 "outbox": outbox, "workspace": workspace, "resumes": 0}
+        if cfg.get("seed_hook"):
+            payload = hook_payload(root, "seed", "start", worker_id, entry)
+            ok, out = run_hook(root, cfg, "seed_hook", payload, worker_id)
+            if not ok:
+                tasks.die(f"seed_hook failed for {tid} -- not spawning "
+                          f"(pre-claim reverted):\n{out}")
+            print(f"seeded {workspace}" + (f": {out.splitlines()[0]}" if out else ""))
+        prompt = build_prompt(root, tid, agent, args.prompt_extra, cfg, outbox,
+                              workspace)
+        prompt_file = write_prompt_file(root, f"{worker_id}.txt", prompt)
         if use_stdin:
             # batch shims (cmd.exe) truncate multi-line argv at the first
             # newline -- the prompt travels on stdin, argv carries one line
             cmd.append(STDIN_POINTER)
             with open(procs.long_path(prompt_file), "rb") as pf:
                 proc = spawn(root, workdir, cmd, log_path, agent,
-                             outbox=outbox, stdin=pf)
+                             outbox=outbox, stdin=pf, workspace=workspace)
         else:
             cmd.append(prompt)
-            proc = spawn(root, workdir, cmd, log_path, agent, outbox=outbox)
+            proc = spawn(root, workdir, cmd, log_path, agent, outbox=outbox,
+                         workspace=workspace)
     except (Exception, SystemExit):
         _revert_preclaim(root, tid, agent)
         raise
 
-    entry = {"task": tid, "session_id": session_id, "pid": proc.pid,
-             "cwd": workdir, "worktree_branch": branch, "model": model,
-             "permission_mode": pm, "agent": agent, "started": tasks.now(),
-             "outbox": outbox, "resumes": 0}
+    entry["pid"] = proc.pid
     with tasks.Lock(root):
         workers = load_workers(root)
         workers[worker_id] = entry
@@ -539,7 +706,13 @@ def cmd_start(args):
           f"permission-mode: {pm}")
     print(f"  cwd:  {workdir}" + (f"   (worktree branch {branch})" if branch else ""))
     print(f"  outbox: {outbox}")
+    print(f"  workspace: {workspace}")
     print(f"  log:  {log_path}")
+    # the remote learns about the run the moment it exists, not on the first
+    # supervisor tick -- a run note with status "running" is the live signal
+    msg = sync_worker(root, cfg, worker_id, entry, "start")
+    if msg:
+        print(f"  {msg}")
     print(f"  next: `watch {worker_id} --follow` to observe this one, "
           f"`wait {worker_id}` to block on it")
     # a planner arming one watcher per worker pays a full context re-read per
@@ -562,9 +735,10 @@ def needs_resume(index, workers, wid):
 
 def cmd_list(args):
     root = tasks.find_dir()
+    cfg = load_config(root)
     workers = load_workers(root)
     for wid in list(workers):
-        maybe_fold(root, workers, wid)
+        maybe_fold(root, workers, wid, cfg)
     index = tasks.load_index(root)
     if args.json:
         out = []
@@ -574,6 +748,8 @@ def cmd_list(args):
             w["state"] = worker_state(workers[wid])
             w["needs_resume"] = needs_resume(index, workers, wid)
             w["task_status"] = index["tasks"].get(w["task"], {}).get("status")
+            w["remote"] = index["tasks"].get(w["task"], {}).get("remote")
+            w.setdefault("workspace", workspace_path(root, wid))
             out.append(w)
         print(json.dumps(out, indent=2))
         return
@@ -641,7 +817,7 @@ def cmd_watch(args):
     wid = resolve_worker(root, workers, args.worker)
     w = workers[wid]
     cfg = load_config(root)
-    maybe_fold(root, workers, wid)
+    maybe_fold(root, workers, wid, cfg)
 
     def raw(line):
         return [line.rstrip("\n")] if line.strip() else []
@@ -676,6 +852,7 @@ def cmd_watch(args):
             return
 
         hb_every, last_hb = heartbeat_interval(cfg), 0.0
+        syncer = LiveSync(root, cfg, wid, w)
         probe_at = time.time() + 2.0
         while True:
             got = False
@@ -702,7 +879,7 @@ def cmd_watch(args):
                     handles.append(["session", f, parse_line, ""])
                     print(f"[session] transcript appeared: {tpath}", flush=True)
             if not pid_alive(w["pid"]):
-                folded = maybe_fold(root, workers, wid)
+                folded = maybe_fold(root, workers, wid, cfg)
                 print(f"[worker {wid} exited"
                       + (f"; outbox folded: {folded}]" if folded else "]"))
                 report_doctor(root)
@@ -710,10 +887,36 @@ def cmd_watch(args):
             if time.time() - last_hb >= hb_every:
                 auto_heartbeat(root, w, cfg)
                 last_hb = time.time()
+            msg = syncer.tick()
+            if msg:
+                print(f"[sync] {msg}", flush=True)
             time.sleep(0.5)
     finally:
         for h in handles:
             h[1].close()
+
+
+class LiveSync:
+    """Periodic sync while a supervisor (wait/watch) sits on a live worker:
+    every sync_interval_seconds, and only when the outbox or workspace has
+    changed since the last push -- a quiet worker costs nothing."""
+
+    def __init__(self, root, cfg, wid, w):
+        self.root, self.cfg, self.wid, self.w = root, cfg, wid, w
+        self.every = float(cfg.get("sync_interval_seconds") or 120)
+        self.enabled = bool(cfg.get("sync_hook"))
+        self.last_at = time.time()
+        self.last_mtime = workspace_mtime(root, wid, w)
+
+    def tick(self):
+        if not self.enabled or time.time() - self.last_at < self.every:
+            return None
+        self.last_at = time.time()
+        mtime = workspace_mtime(self.root, self.wid, self.w)
+        if mtime <= self.last_mtime:
+            return None
+        self.last_mtime = mtime
+        return sync_worker(self.root, self.cfg, self.wid, self.w, "running")
 
 
 def cmd_wait(args):
@@ -724,6 +927,7 @@ def cmd_wait(args):
     w = workers[wid]
     deadline = time.time() + args.timeout if args.timeout else None
     hb_every, last_hb = heartbeat_interval(cfg), 0.0
+    syncer = LiveSync(root, cfg, wid, w)
     while pid_alive(w["pid"]):
         if deadline and time.time() > deadline:
             print(f"timeout: {wid} still running (pid {w['pid']})")
@@ -731,8 +935,11 @@ def cmd_wait(args):
         if time.time() - last_hb >= hb_every:
             auto_heartbeat(root, w, cfg)
             last_hb = time.time()
+        msg = syncer.tick()
+        if msg:
+            print(msg, flush=True)
         time.sleep(1)
-    folded = maybe_fold(root, workers, wid)
+    folded = maybe_fold(root, workers, wid, cfg)
     if folded:
         print(f"outbox folded: {folded}")
     report_doctor(root)
@@ -761,8 +968,10 @@ def cmd_resume(args):
     if not os.path.isfile(outbox):
         with open(procs.long_path(outbox), "w", encoding="utf-8") as f:
             f.write("")  # earlier content was folded into the note on exit
+    workspace = ensure_workspace(root, wid)  # survives exits; seed/ intact
     prompt = args.prompt or CONTINUATION_PROMPT.format(
-        tid=w["task"], note=tasks.note_path(root, w["task"]), outbox=outbox)
+        tid=w["task"], note=tasks.note_path(root, w["task"]), outbox=outbox,
+        workspace=workspace)
     n = w.get("resumes", 0) + 1
     prompt_file = write_prompt_file(root, f"{wid}.resume{n}.txt", prompt)
     cfg["_root"] = root
@@ -772,18 +981,73 @@ def cmd_resume(args):
         cmd.append(STDIN_POINTER)
         with open(procs.long_path(prompt_file), "rb") as pf:
             proc = spawn(root, w["cwd"], cmd, log_path, w["agent"],
-                         outbox=outbox, stdin=pf)
+                         outbox=outbox, stdin=pf, workspace=workspace)
     else:
         cmd.append(prompt)
-        proc = spawn(root, w["cwd"], cmd, log_path, w["agent"], outbox=outbox)
+        proc = spawn(root, w["cwd"], cmd, log_path, w["agent"], outbox=outbox,
+                     workspace=workspace)
     with tasks.Lock(root):
         workers = load_workers(root)
         workers[wid].update(pid=proc.pid, resumes=workers[wid].get("resumes", 0) + 1,
-                            resumed=tasks.now())
+                            resumed=tasks.now(), workspace=workspace)
         save_workers(root, workers)
         tasks.append_log(root, w["task"], "dispatcher",
                          f"resumed worker {wid} (pid {proc.pid})")
+        w = workers[wid]
     print(f"resumed {wid} (pid {proc.pid}, session {w['session_id']})")
+    msg = sync_worker(root, cfg, wid, w, "start")
+    if msg:
+        print(f"  {msg}")
+
+
+def cmd_sync(args):
+    """Push workers' outboxes + workspaces onward through the sync hook, on
+    demand -- for a cron, a planner that wants the remote fresh before it
+    looks, or any supervisor that is not `wait`/`watch`. Exited workers are
+    folded first, so their final state goes out (once) the same way it would
+    under a supervisor; already-folded ones are re-pushed as `exited` with
+    the outcome inferred from the task."""
+    root = tasks.find_dir()
+    cfg = load_config(root)
+    if not cfg.get("sync_hook"):
+        tasks.die("no sync_hook configured in .agent-tasks/config.json "
+                  "(or config.local.json)")
+    workers = load_workers(root)
+    if args.worker:
+        wids = [resolve_worker(root, workers, raw) for raw in args.worker]
+    elif args.all:
+        wids = sorted(workers, key=lambda k: workers[k]["started"])
+    else:
+        wids = [wid for wid in sorted(workers, key=lambda k: workers[k]["started"])
+                if worker_state(workers[wid]) == "running"]
+        if not wids:
+            print("no running workers (pass WORKER ids or --all for exited ones)")
+            return
+    index = tasks.load_index(root)
+    for wid in wids:
+        w = workers[wid]
+        if worker_state(w) == "running":
+            print(sync_worker(root, cfg, wid, w, "running"))
+            continue
+        applied = fold_outbox(root, wid, w)  # folds + syncs exactly once...
+        if applied is not None:
+            outbox = (w.get("outbox") or outbox_path(root, wid))[:-3] + ".folded.md"
+            print(sync_worker(root, cfg, wid, w, "exited",
+                              fold_outcome(root, w, applied), outbox=outbox))
+            continue
+        # ...otherwise it was folded earlier: re-push from the archived outbox
+        task = index["tasks"].get(w["task"], {})
+        if task.get("status") == "review":
+            outcome = "review"
+        elif task.get("status") == "in_progress" and task.get("assignee") == w["agent"]:
+            outcome = "died"
+        elif task.get("status") == "open" and task.get("blockers"):
+            outcome = "blocked: " + task["blockers"][-1]
+        else:
+            outcome = "ended"
+        folded = (w.get("outbox") or outbox_path(root, wid))[:-3] + ".folded.md"
+        print(sync_worker(root, cfg, wid, w, "exited", outcome,
+                          outbox=folded if os.path.isfile(folded) else None))
 
 
 def cmd_stop(args):
@@ -808,7 +1072,8 @@ def cmd_prompt(args):
     tid = tasks.resolve_id(index, args.task)
     print(build_prompt(root, tid, args.agent_name or "<worker-name>",
                        args.prompt_extra, cfg,
-                       outbox_path(root, "<worker-id>")))
+                       outbox_path(root, "<worker-id>"),
+                       workspace_path(root, "<worker-id>")))
 
 
 # ---------------------------------------------------------------- cli
@@ -871,6 +1136,13 @@ def main():
     p.add_argument("--agent-name")
     p.add_argument("--prompt-extra")
     p.set_defaults(func=cmd_prompt)
+
+    p = sub.add_parser("sync", help="push workers' outbox + workspace onward via "
+                                    "the configured sync_hook (default: running "
+                                    "workers)")
+    p.add_argument("worker", nargs="*", help="worker ids / prefixes / task ids")
+    p.add_argument("--all", action="store_true", help="every worker, exited too")
+    p.set_defaults(func=cmd_sync)
 
     args = parser.parse_args()
     args.func(args)

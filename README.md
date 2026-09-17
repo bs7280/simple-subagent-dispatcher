@@ -104,7 +104,8 @@ queue at any time.
 | command | what it does |
 |---|---|
 | `init` | create `.agent-tasks/` in the current directory |
-| `create TITLE [--body --criteria --priority --tags --blocked-by --model --resources]` | create a task + note (`--model` pins the model it needs; `--resources` declares exclusive-resource tags) |
+| `create TITLE [--body --criteria --priority --tags --blocked-by --model --resources --remote REF]` | create a task + note (`--model` pins the model it needs; `--resources` declares exclusive-resource tags; `--remote` links it to an outside tracker — an opaque string only the project's seed/sync hooks interpret) |
+| `remote ID [REF]` | print or set a task's remote-tracker reference (`-` clears); see [Linking a remote tracker](#linking-a-remote-tracker-seed--sync-hooks) |
 | `list [--status s1,s2] [--assignee] [--all] [--json]` | list tasks (hides done/cancelled by default) |
 | `show ID [--json]` | metadata + full note |
 | `next [--claim --assignee NAME] [--tier MODEL] [--json]` | best ready task (open/expired-lease, unblocked, priority-ordered); `--tier` only draws tasks at/below that `model_tiers` entry; exit 1 if none |
@@ -153,6 +154,7 @@ lacks:
 | `resume WORKER [--prompt]` | continue a dead worker's session (default continuation prompt re-orients it: re-read task, check `git status`, carry on) |
 | `stop WORKER` | SIGTERM; the session survives for `resume` |
 | `prompt TASK-042` | print the worker prompt without spawning (paste into any session) |
+| `sync [WORKER…\|--all]` | push workers' outbox + workspace onward through the project's `sync_hook` now (running workers by default; exited ones are folded first, or re-pushed with the outcome inferred from the task) |
 
 `WORKER` accepts a worker id, a unique prefix, or a task id (→ that task's
 latest worker).
@@ -257,6 +259,10 @@ So dispatched workers don't get a CLI contract at all:
 - Each worker gets a **per-worker outbox** (`.agent-tasks/runtime/outbox/
   <worker-id>.md`, also exported as `AGENT_TASKS_OUTBOX`): one writer, ordinary
   file tools, plain markdown. Progress, findings, escalations — all prose.
+  Beside it, a **workspace** directory (`…/outbox/<worker-id>/`,
+  `AGENT_TASKS_WORKSPACE`) with `seed/` (context prepared for it), `notes/`
+  (longer write-ups) and `attachments/` (screenshots) — see
+  [Linking a remote tracker](#linking-a-remote-tracker-seed--sync-hooks).
 - The worker signals its terminal state with one sentinel line: `STATUS:
   review` or `STATUS: blocked: <reason>`. Tiny, forgiving grammar — one token,
   last occurrence wins, case-insensitive. Nothing else to get wrong.
@@ -456,6 +462,78 @@ Three rules make it work:
 
 Field-validated: concurrent workers driving an existing repo's worklist
 through wrapper tasks, including the blocked path end-to-end in production.
+
+## Linking a remote tracker: seed + sync hooks
+
+The wrapper-task pattern bridges a tracker the worker can *reach*. Often it
+can't, or shouldn't: the worker is a cheap model that fumbles APIs, it runs in
+an off-network sandbox, or you simply don't want to hand every worker a token
+to your knowledge base. The plugin's answer keeps the worker on **plain files**
+and moves the integration to the dispatcher side, behind two hooks:
+
+```
+                 seed_hook                                 sync_hook
+ remote ────────────────────▶  workspace/seed/   ┐
+ tracker                                          │ worker reads/writes files only
+        ◀────────────────────  outbox + workspace ┘
+          (at spawn, every N seconds while supervised, and at fold w/ outcome)
+```
+
+- **A task carries `remote`** — `tasks create … --remote <ref>` or `tasks
+  remote TASK-042 <ref>`. It is an **opaque string**: a vault stem, a Jira
+  key, an issue URL. The queue never interprets it; your hooks do.
+- **Every worker gets a workspace** beside its outbox
+  (`.agent-tasks/runtime/outbox/<worker-id>/`, exported as
+  `AGENT_TASKS_WORKSPACE`): `seed/` (read-only context materialized before
+  spawn; when `seed/ticket.md` exists the prompt tells the worker *that* is
+  the real spec), `notes/` (its longer write-ups, one file each), and
+  `attachments/` (screenshots, artifacts). All under `runtime/`, so it is
+  outside the queue-write fence and never committed.
+- **`seed_hook`** (config, argv list) runs **before spawn**, cwd = the repo,
+  with a JSON payload on stdin. Its job: fill `seed/`. A non-zero exit
+  **aborts the dispatch and reverts the pre-claim** — if you configured a
+  seed, you meant it.
+- **`sync_hook`** (config, argv list) runs with the same payload shape at
+  three moments: right after spawn (`phase: start` — the remote learns the
+  run exists immediately), every `sync_interval_seconds` (default 120) while
+  a supervisor (`wait`/`watch`) sits on the worker **and only if the outbox or
+  workspace changed** (`phase: running`), and once at fold (`phase: exited`,
+  with `outcome`: `review`, `blocked: <reason>`, `died`, or `ended`). It is
+  best-effort everywhere: failures are warnings in the spawn log, never a
+  blocked fold. `dispatch sync [WORKER…|--all]` fires it on demand (a cron, a
+  planner that wants the remote fresh, any supervisor that isn't
+  `wait`/`watch`).
+- **The payload**, one JSON document on stdin:
+
+  ```json
+  {"event": "seed" | "sync", "phase": "start" | "running" | "exited",
+   "outcome": null | "review" | "blocked: <reason>" | "died" | "ended",
+   "queue": "<.agent-tasks path>", "repo": "<repo path>",
+   "task": {"id": "TASK-042", "title": "…", "status": "…", "remote": "…", "…": "…"},
+   "note": "<task note path>", "outbox": "<outbox path>",
+   "workspace": "<workspace dir>",
+   "worker": {"id": "…", "agent": "…", "session_id": "…", "model": "…",
+              "cwd": "…", "worktree_branch": "…", "started": "…", "pid": 0}}
+  ```
+
+  Hook stdout/stderr lands in the worker's spawn log, so `watch` shows a
+  failed push beside the session activity it relates to.
+
+Machine paths belong in `config.local.json`, the gitignored overlay:
+
+```json
+{"seed_hook": ["uv", "run", "/path/to/my_tracker_bridge.py", "seed"],
+ "sync_hook": ["uv", "run", "/path/to/my_tracker_bridge.py", "sync"],
+ "sync_interval_seconds": 60}
+```
+
+What this buys: the same worker prompt works for a Claude Code session, a
+different harness, or a locked-down sandbox with no network — the worker only
+ever touches files, and whatever process holds the credentials (the
+dispatcher, a cron, a parent session) does the pushing. A reference bridge
+for a markdown vault (seed the linked ticket, publish the run as a child note
+`<ticket>.runs.<worker-id>`) lives in the author's
+[claude-tools](https://github.com/bs7280) repo under `skills/agent-tasks-vault/`.
 
 ## Roadmap
 

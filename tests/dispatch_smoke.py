@@ -28,6 +28,7 @@ print("FAKE-CLAUDE AGENT_TASKS_DIR:", os.environ.get("AGENT_TASKS_DIR", "unset")
 print("FAKE-CLAUDE AGENT:", os.environ.get("AGENT_TASKS_AGENT", "unset"))
 print("FAKE-CLAUDE CWD:", os.path.realpath(os.getcwd()))
 print("FAKE-CLAUDE CLAUDECODE:", os.environ.get("CLAUDECODE", "unset"))
+print("FAKE-CLAUDE WORKSPACE:", os.environ.get("AGENT_TASKS_WORKSPACE", "unset"))
 data = sys.stdin.read()
 prompt = data if data.strip() else (sys.argv[-1] if len(sys.argv) > 1 else "")
 print("FAKE-CLAUDE PROMPT-VIA:", "stdin" if data.strip() else "argv")
@@ -49,8 +50,36 @@ elif mode == "blocked":
 elif mode == "sleepy":
     time.sleep(5)
     write("slow but done\\nSTATUS: review\\n")
+elif mode == "chatty":
+    # writes at t=0 and t=2 so a 1s live-sync tick sees a change while the
+    # worker is verifiably alive, then finishes at t=4
+    ws = os.environ.get("AGENT_TASKS_WORKSPACE")
+    write("starting\\n")
+    time.sleep(2)
+    write("midway\\n")
+    with open(os.path.join(ws, "notes", "report.md"), "w", encoding="utf-8") as f:
+        f.write("# Report\\n\\nseed said: " + open(os.path.join(ws, "seed", "ticket.md")).read())
+    time.sleep(2)
+    write("STATUS: review\\n")
 else:
     time.sleep(3)
+"""
+
+FAKE_HOOK = """\
+import json, os, sys
+kind = sys.argv[1]
+payload = json.load(sys.stdin)
+with open(os.environ["FAKE_HOOK_LOG"], "a", encoding="utf-8") as f:
+    f.write(json.dumps({"kind": kind, "payload": payload}) + "\\n")
+if kind == "seed" and payload["task"].get("remote") == "FAIL":
+    print("refusing to seed FAIL", file=sys.stderr)
+    sys.exit(1)
+if kind == "seed":
+    seed = os.path.join(payload["workspace"], "seed")
+    os.makedirs(seed, exist_ok=True)
+    with open(os.path.join(seed, "ticket.md"), "w", encoding="utf-8") as f:
+        f.write("# remote spec for " + str(payload["task"].get("remote")) + "\\n")
+print(kind, "ok", payload["worker"]["id"], payload["phase"], payload.get("outcome"))
 """
 
 
@@ -454,6 +483,124 @@ def run_all(tmp):
     t3 = tasksc("create", "Blocked", "--blocked-by", t2).stdout.split()[1]
     if disp("start", t3, check=False).returncode == 0:
         fail("start should refuse a blocked task")
+
+    # ---- remote bridge: workspace, seed hook, sync hook (start/running/exited) ----
+    hook = os.path.join(tmp, "fake_hook.py")
+    with open(hook, "w", encoding="utf-8") as f:
+        f.write(FAKE_HOOK)
+    hook_log = os.path.join(tmp, "hooks.jsonl")
+    env["FAKE_HOOK_LOG"] = hook_log
+
+    def hook_records():
+        if not os.path.isfile(hook_log):
+            return []
+        with open(hook_log, encoding="utf-8") as f:
+            return [json.loads(l) for l in f if l.strip()]
+
+    set_cfg("chatty", seed_hook=[PY, hook, "seed"], sync_hook=[PY, hook, "sync"],
+            sync_interval_seconds=1)
+    tv = tasksc("create", "Remote-linked task", "--remote", "tracker://item/7").stdout.split()[1]
+    if json.loads(tasksc("show", tv, "--json").stdout).get("remote") != "tracker://item/7":
+        fail("create --remote should land in the index")
+    if "remote: tracker://item/7" not in open(os.path.join(
+            repo, ".agent-tasks", "tasks", f"{tv}.md"), encoding="utf-8").read():
+        fail("create --remote should be mirrored into the note frontmatter")
+    out = disp("prompt", tv).stdout
+    if "seed/ticket.md" not in out or "attachments/" not in out:
+        fail("prompt should describe the workspace layout")
+
+    res = disp("start", tv)
+    wv = started_id(res)
+    if "seeded" not in res.stdout or "workspace:" not in res.stdout:
+        fail(f"start should report seeding and the workspace: {res.stdout}")
+    if f"synced {wv} (start)" not in res.stdout:
+        fail(f"start should sync the fresh run immediately: {res.stdout}")
+    ws = os.path.join(repo, ".agent-tasks", "runtime", "outbox", wv)
+    for sub in ("seed", "notes", "attachments"):
+        if not os.path.isdir(os.path.join(ws, sub)):
+            fail(f"workspace/{sub} not created")
+    if "remote spec for tracker://item/7" not in open(
+            os.path.join(ws, "seed", "ticket.md"), encoding="utf-8").read():
+        fail("seed hook output missing from workspace/seed")
+    recs = hook_records()
+    if [(r["kind"], r["payload"]["phase"]) for r in recs][:2] != [("seed", "start"), ("sync", "start")]:
+        fail(f"hook order should be seed then sync(start): {[(r['kind'], r['payload']['phase']) for r in recs]}")
+    seed_p = recs[0]["payload"]
+    if (seed_p["event"] != "seed" or seed_p["task"]["remote"] != "tracker://item/7"
+            or seed_p["worker"]["id"] != wv
+            or os.path.realpath(seed_p["workspace"]) != os.path.realpath(ws)
+            or os.path.realpath(seed_p["repo"]) != os.path.realpath(repo)
+            or not seed_p["worker"]["session_id"]):
+        fail(f"seed payload incomplete: {seed_p}")
+    time.sleep(1)
+    if "FAKE-CLAUDE WORKSPACE: " + os.path.realpath(ws) not in log_text(wv):
+        fail("AGENT_TASKS_WORKSPACE not exported to the worker")
+    w = next(x for x in json.loads(disp("list", "--json").stdout) if x["id"] == wv)
+    if w.get("remote") != "tracker://item/7" or os.path.realpath(w.get("workspace", "")) != os.path.realpath(ws):
+        fail(f"list --json should carry remote + workspace: {w}")
+
+    res = disp("wait", wv, check=False)
+    if res.returncode != 0:
+        fail(f"chatty worker wait rc={res.returncode}: {res.stdout}\n{res.stderr}")
+    recs = hook_records()
+    phases = [(r["kind"], r["payload"]["phase"], r["payload"].get("outcome")) for r in recs]
+    if ("sync", "running", None) not in phases:
+        fail(f"live sync while the worker was running never fired: {phases}")
+    exited = [r for r in recs if r["kind"] == "sync" and r["payload"]["phase"] == "exited"]
+    if len(exited) != 1:
+        fail(f"exactly one exited sync per fold, got {len(exited)}: {phases}")
+    xp = exited[0]["payload"]
+    if (xp["outcome"] != "review" or xp["task"]["status"] != "review"
+            or not xp["outbox"].endswith(".folded.md") or not os.path.isfile(xp["outbox"])):
+        fail(f"exited payload should carry the outcome and the folded outbox: {xp}")
+    if "midway" not in open(xp["outbox"], encoding="utf-8").read():
+        fail("folded outbox passed to the hook should hold the worker's prose")
+    if not os.path.isfile(os.path.join(ws, "notes", "report.md")):
+        fail("worker's workspace note missing")
+    if "sync/running ok" not in log_text(wv) or "sync/exited ok" not in log_text(wv):
+        fail("hook runs should be recorded in the spawn log")
+    disp("list")  # a later observation must not re-fire the exited sync
+    if len([r for r in hook_records() if r["payload"]["phase"] == "exited"]) != 1:
+        fail("fold-time sync fired twice")
+
+    # manual re-push of an already-folded worker infers the outcome
+    res = disp("sync", wv)
+    if f"synced {wv} (exited, review)" not in res.stdout:
+        fail(f"dispatch sync should re-push an exited worker: {res.stdout}")
+    if len([r for r in hook_records() if r["payload"]["phase"] == "exited"]) != 2:
+        fail("dispatch sync should have fired the hook again")
+    if "no running workers" not in disp("sync").stdout:
+        fail("dispatch sync with nothing running should say so")
+
+    # seed failure aborts the dispatch and reverts the pre-claim
+    tf = tasksc("create", "Seed fails", "--remote", "FAIL").stdout.split()[1]
+    res = disp("start", tf, check=False)
+    if res.returncode == 0 or "seed_hook failed" not in res.stderr:
+        fail(f"a failing seed hook must abort the start: {res.stderr}")
+    t = json.loads(tasksc("show", tf, "--json").stdout)
+    if t["status"] != "open" or t["assignee"]:
+        fail(f"failed seed must revert the pre-claim: {t}")
+    if not any(x["task"] == tf for x in json.loads(disp("list", "--json").stdout)) is False:
+        pass  # no worker registered for an aborted spawn
+    if any(x["task"] == tf for x in json.loads(disp("list", "--json").stdout)):
+        fail("an aborted spawn must not register a worker")
+
+    # tasks remote: get / set / clear, mirrored into the note
+    if tasksc("remote", tv).stdout.strip() != "tracker://item/7":
+        fail("tasks remote should print the reference")
+    tasksc("remote", tv, "tracker://item/8")
+    note = open(os.path.join(repo, ".agent-tasks", "tasks", f"{tv}.md"), encoding="utf-8").read()
+    if json.loads(tasksc("show", tv, "--json").stdout).get("remote") != "tracker://item/8" \
+            or "remote: tracker://item/8" not in note or "item/7" in note.split("---")[1]:
+        fail("tasks remote REF should update index + frontmatter")
+    tasksc("remote", tv, "-")
+    note = open(os.path.join(repo, ".agent-tasks", "tasks", f"{tv}.md"), encoding="utf-8").read()
+    if "remote" in json.loads(tasksc("show", tv, "--json").stdout) or "remote:" in note.split("---")[1]:
+        fail("tasks remote - should clear index + frontmatter")
+    if tasksc("remote", tv, check=False).returncode != 1:
+        fail("tasks remote on a task without one should exit 1")
+    del env["FAKE_HOOK_LOG"]
+    set_cfg()
 
     print("ALL DISPATCH SMOKE TESTS PASSED")
 

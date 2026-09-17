@@ -73,12 +73,21 @@ Rules for a good task note:
   The dispatcher uses the task's model automatically (task > config > CLI
   default), and tier-limited workers (`next --tier`) respect it: a haiku-tier
   worker never picks up an opus-pinned task.
-- **Bridging an existing tracker?** Use the wrapper-task pattern: the task
-  body says "execute task <X> from this repo's own tracker via its own
-  protocol; outbox + sentinel are your only duties to this queue", and the
-  acceptance criteria reference the *other* system's receipts (its done
-  status, its verification note) — review checks the real system, not the
-  wrapper's word.
+- **Bridging an existing tracker?** Two patterns. If the worker can reach
+  the tracker itself, use the wrapper-task pattern: the task body says
+  "execute task <X> from this repo's own tracker via its own protocol; outbox
+  + sentinel are your only duties to this queue", and the acceptance criteria
+  reference the *other* system's receipts (its done status, its verification
+  note) — review checks the real system, not the wrapper's word. If the
+  worker should stay on plain files (cheap model, sandbox, no credentials),
+  link the task instead: `--remote <ref>` (or `tasks remote TASK-042 <ref>`)
+  — an opaque handle the project's configured `seed_hook`/`sync_hook`
+  interpret. The dispatcher then seeds the remote item into the worker's
+  `workspace/seed/` before spawn and pushes its outbox + workspace back at
+  spawn, on an interval while supervised, and at fold with the outcome. Check
+  `.agent-tasks/config.json` / `config.local.json` for whether hooks exist
+  and what `remote` values they expect; without hooks, `remote` is inert
+  metadata.
 - **Sequence with blockers.** `--blocked-by TASK-001` (or later
   `tasks block TASK-005 TASK-001`). A blocker naming a task id auto-resolves
   when that task is done/cancelled; free-text blockers (e.g. "waiting on API
@@ -127,6 +136,10 @@ Options, by weight:
   - `dispatch resume <worker>` — continue a dead worker's session; context and
     uncommitted edits survive on disk, nothing is lost.
   - `dispatch stop <worker>` — SIGTERM; the session survives for `resume`.
+  - `dispatch sync [<worker>… | --all]` — push workers' outbox + workspace
+    through the project's `sync_hook` now (running workers by default);
+    `wait`/`watch` already do this on an interval, so this is for cron-style
+    supervision or when you want the remote tracker fresh before you look.
   Only run workers **in parallel in-place** if their tasks touch disjoint
   files; otherwise use `--worktree` or serialize with blockers. Dispatched
   workers get `AGENT_TASKS_DIR` pointing at the shared queue, so worktree

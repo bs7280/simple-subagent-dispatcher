@@ -33,7 +33,13 @@ If your spawn prompt names an **outbox file** (under
 **zero queue-CLI calls**: the task is pre-claimed for you, a supervisor keeps
 the lease alive, and everything you'd normally log or update goes into the
 outbox **with your ordinary file tools** — progress notes, findings,
-decisions, escalations, all plain markdown. Queue files (the task note,
+decisions, escalations, all plain markdown. Beside the outbox is your
+**workspace** directory (`AGENT_TASKS_WORKSPACE`): read `seed/` first if it
+is not empty — when `seed/ticket.md` exists, *that* is the real spec and the
+task note is only a wrapper; put longer write-ups in `notes/<name>.md` and
+screenshots/artifacts in `attachments/`. All of it is collected and forwarded
+for you (to the task note, and to whatever tracker the queue is linked to).
+Queue files (the task note,
 `index.json`) are read-only to you. Finish by making the LAST line of the
 outbox exactly `STATUS: review` (after really running the acceptance checks)
 or `STATUS: blocked: <what you need>`. The dispatcher folds your outbox into
