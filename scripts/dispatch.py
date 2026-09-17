@@ -246,7 +246,10 @@ def fold_outbox(root, wid, w):
                 tasks.save_index(root, index)
                 tasks.set_note_status(root, tid, "review")
                 tasks.append_log(root, tid, w["agent"],
-                                 "status: in_progress -> review (outbox sentinel)")
+                                 "status: in_progress -> review (outbox sentinel)",
+                                 kind="status",
+                                 data={"from": "in_progress", "to": "review",
+                                       "worker": wid})
                 applied = "review"
             else:
                 reason = reason or f"worker {wid} reported blocked without a reason"
@@ -258,7 +261,9 @@ def fold_outbox(root, wid, w):
                 tasks.save_index(root, index)
                 tasks.set_note_status(root, tid, "open")
                 tasks.append_log(root, tid, w["agent"],
-                                 f"blocked (outbox sentinel): {reason} -- back to open")
+                                 f"blocked (outbox sentinel): {reason} -- back to open",
+                                 kind="block",
+                                 data={"blockers": [reason], "worker": wid})
                 applied = f"blocked: {reason}"
         os.replace(procs.long_path(outbox),
                    procs.long_path(outbox[:-3] + ".folded.md"))
@@ -535,7 +540,13 @@ def cmd_start(args):
     print(f"  cwd:  {workdir}" + (f"   (worktree branch {branch})" if branch else ""))
     print(f"  outbox: {outbox}")
     print(f"  log:  {log_path}")
-    print(f"  next: `watch {worker_id} --follow` to observe, `wait {worker_id}` to block")
+    print(f"  next: `watch {worker_id} --follow` to observe this one, "
+          f"`wait {worker_id}` to block on it")
+    # a planner arming one watcher per worker pays a full context re-read per
+    # exit; await pays one for the whole batch, and only for decisions
+    print(f"        supervising a batch? `{runner_str(cfg)} "
+          f"{os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tasks.py')}"
+          f" await` -- one wake, when something needs you")
 
 
 def needs_resume(index, workers, wid):

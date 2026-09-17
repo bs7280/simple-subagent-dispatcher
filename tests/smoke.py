@@ -538,10 +538,226 @@ def test_config_overlay(tmp):
         fail(f"project-config model_tiers should survive the overlay: {res.stderr}")
 
 
+
+def test_journal(tmp):
+    """Every mutation lands in the journal, and `since` answers "what changed
+    after this cursor" without re-reading the board or any note."""
+    q = Queue(tmp)
+    q.run("init")
+    t1 = q.out("create", "Journal one", "--agent", "planner").split()[1]
+    mark = q.js("since", "--json")["cursor"]
+    t2 = q.out("create", "Journal two", "--agent", "planner").split()[1]
+    q.run("claim", t1, "--assignee", "worker-a")
+    q.run("log", t1, "poking at middleware.ts", "--agent", "worker-a")
+    q.run("status", t1, "review", "--agent", "worker-a")
+
+    after = q.js("since", "--cursor", str(mark), "--json")
+    kinds = [e["kind"] for e in after["events"]]
+    if kinds != ["create", "claim", "log", "status"]:
+        fail(f"journal kinds after cursor: {kinds}")
+    if [e["seq"] for e in after["events"]] != sorted(e["seq"] for e in after["events"]):
+        fail("journal is not ordered by seq")
+    if after["cursor"] <= mark:
+        fail("cursor did not advance")
+    status = after["events"][-1]
+    if status["from"] != "in_progress" or status["to"] != "review":
+        fail(f"status event lost its transition: {status}")
+
+    # actionable = decisions only; narration and bookkeeping stay out
+    act = q.js("since", "--cursor", str(mark), "--actionable", "--json")["events"]
+    if [e["kind"] for e in act] != ["create", "status"]:
+        fail(f"--actionable let narration through: {[e['kind'] for e in act]}")
+    if any(e["task"] != t2 for e in q.js("since", "--task", t2, "--json")["events"]):
+        fail("--task filter leaked other tasks")
+    if "cursor:" not in q.out("board"):
+        fail("board should print the cursor a waker can resume from")
+
+
+def _await(tmp, *args, agent="planner"):
+    """Start a watcher; the caller drives the queue and then joins it."""
+    return subprocess.Popen(
+        [PY, CLI, "await", "--agent", agent, "--poll", "0.2",
+         "--debounce", "0.4", "--json", *args],
+        cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def test_await_wakes_only_on_decisions(tmp):
+    q = Queue(tmp)
+    q.run("init")
+    t1 = q.out("create", "Await one", "--agent", "planner").split()[1]
+    t2 = q.out("create", "Await two", "--agent", "planner").split()[1]
+    q.run("claim", t1, "--assignee", "worker-a")
+    q.run("claim", t2, "--assignee", "worker-b")
+
+    p = _await(tmp, "--timeout", "30s")
+    time.sleep(1.2)
+    # narration from a worker, and the planner's own bookkeeping: neither is a
+    # decision, so neither may wake the watcher
+    q.run("log", t1, "still reading middleware.ts", "--agent", "worker-a")
+    q.run("create", "Planner's own follow-up", "--agent", "planner")
+    q.run("heartbeat", t2, "--assignee", "worker-b")  # leases are not news
+    time.sleep(1.2)
+    if p.poll() is not None:
+        fail(f"watcher woke on narration/self-writes: {p.stdout.read()}")
+
+    # two finishes in quick succession: one wake carrying both
+    q.run("status", t1, "review", "--agent", "worker-a")
+    time.sleep(0.2)
+    q.run("status", t2, "review", "--agent", "worker-b")
+    out, err = p.communicate(timeout=30)
+    if p.returncode != 0:
+        fail(f"watcher should exit 0 on a wake, got {p.returncode}: {out}{err}")
+    wake = json.loads(out[out.index("{"):])
+    if wake["wake"] != "2 review":
+        fail(f"debounce should coalesce the burst into one wake: {wake['wake']}")
+    if {h["task"] for h in wake["hits"]} != {t1, t2}:
+        fail(f"wake lost a task: {wake['hits']}")
+    # the digest must hand back a cursor that still replays the delta it woke
+    # for -- not one already advanced past it
+    replay = q.js("since", "--cursor", str(wake["from_cursor"]), "--actionable",
+                  "--json")["events"]
+    if {e["task"] for e in replay if e.get("to") == "review"} != {t1, t2}:
+        fail(f"from_cursor does not replay the wake: {replay}")
+
+
+    # the wake is counted where a human (or the next planner) can see it
+    sup = q.js("supervisor", "--json")
+    if sup["wakes"] != 1 or sup["last_wake"]["reason"] != "2 review":
+        fail(f"wake not recorded on the lease: {sup}")
+
+    # a drain trigger is a standing condition, not an event: it fires once
+    q.run("done", t1, "--agent", "planner")
+    q.run("done", t2, "--agent", "planner")
+    res = q.run("await", "--agent", "planner", "--for", "drain", "--poll", "0.2",
+                "--debounce", "0.6", "--timeout", "10s", "--json", check=False)
+    drain = json.loads(res.stdout[res.stdout.index("{"):])
+    if res.returncode != 0 or drain["wake"] != "1 drain":
+        fail(f"drain should fire exactly once: rc={res.returncode} {res.stdout}")
+
+
+def test_await_quiet_and_blocked(tmp):
+    q = Queue(tmp)
+    q.run("init")
+    t = q.out("create", "Quiet probe", "--agent", "planner").split()[1]
+    q.run("claim", t, "--assignee", "worker-a")
+
+    res = q.run("await", "--agent", "planner", "--poll", "0.2",
+                "--timeout", "1s", check=False)
+    if res.returncode != 2:
+        fail(f"a quiet watch must exit 2, got {res.returncode}: {res.stdout}")
+    if "handoff" not in res.stdout:
+        fail("a quiet timeout should point at the handoff, not at more waiting")
+
+    # a worker's question (free-text blocker) is a decision for the planner
+    p = _await(tmp, "--timeout", "30s")
+    time.sleep(1.0)
+    q.run("block", t, "need the staging API key", "--agent", "worker-a")
+    out, err = p.communicate(timeout=30)
+    if p.returncode != 0:
+        fail(f"blocked should wake the planner: rc={p.returncode} {out}{err}")
+    wake = json.loads(out[out.index("{"):])
+    if wake["wake"] != "1 blocked" or "staging API key" not in str(wake["hits"]):
+        fail(f"blocked wake lost the question: {wake}")
+
+
+def test_supervisor_lease(tmp):
+    q = Queue(tmp)
+    q.run("init")
+    if "none" not in q.out("supervisor"):
+        fail("a fresh queue has no supervisor")
+
+    q.run("supervisor", "claim", "--agent", "planner-a")
+    busy = q.run("supervisor", "claim", "--agent", "planner-b", check=False)
+    if busy.returncode != 4 or "BUSY" not in busy.stdout:
+        fail(f"a second planner must not quietly share the lease: {busy.stdout}")
+    if q.run("supervisor", "claim", "--agent", "planner-b", "--takeover",
+             check=False).returncode != 0:
+        fail("--takeover should supersede a fresh lease")
+
+    # yesterday's watcher, still running, when a new session starts today
+    p = _await(tmp, "--timeout", "30s", agent="planner-b")
+    time.sleep(1.0)
+    q.run("supervisor", "claim", "--agent", "planner-b")  # the new session
+    out, err = p.communicate(timeout=30)
+    if p.returncode != 4:
+        fail(f"a superseded watcher must exit 4, got {p.returncode}: {out}{err}")
+    if "superseded" not in out or "re-arm" not in out:
+        fail(f"the superseded watcher must say so plainly: {out}")
+
+    # retirement silences watchers too, and survives as queue state
+    p = _await(tmp, "--timeout", "30s", agent="planner-b")
+    time.sleep(1.0)
+    q.run("supervisor", "retire", "--agent", "planner-b", "--note", "done for today")
+    out, _ = p.communicate(timeout=30)
+    if p.returncode != 4 or "retired" not in out:
+        fail(f"a retired watcher must exit 4: rc={p.returncode} {out}")
+    if "retired by planner-b" not in q.out("board"):
+        fail("the board should say nobody is watching")
+
+    # an abandoned lease is an integrity finding, not a silent squatter
+    with open(os.path.join(tmp, ".agent-tasks", "config.json"), "w",
+              encoding="utf-8") as f:
+        json.dump({"supervisor_ttl_minutes": 0}, f)
+    q.run("supervisor", "claim", "--agent", "planner-c")
+    doc = q.run("doctor", check=False)
+    if "supervisor" not in doc.stdout or doc.returncode != 1:
+        fail(f"doctor should flag an abandoned supervisor lease: {doc.stdout}")
+
+
+def test_handoff(tmp):
+    q = Queue(tmp)
+    q.run("init")
+    if "no handoff recorded" not in q.out("handoff"):
+        fail("a fresh queue should say so rather than error")
+
+    t1 = q.out("create", "Finished work", "--agent", "planner").split()[1]
+    t2 = q.out("create", "Stuck work", "--agent", "planner").split()[1]
+    t3 = q.out("create", "Next up", "--priority", "high", "--agent", "planner").split()[1]
+    q.run("claim", t1, "--assignee", "worker-a")
+    q.run("status", t1, "review", "--agent", "worker-a")
+    q.run("block", t2, "need the staging API key", "--agent", "worker-b")
+
+    q.run("supervisor", "claim", "--agent", "planner")
+    out = q.out("handoff", "--write", "--retire", "--agent", "planner",
+                "--note", "worker-a's fix is unverified; check the redirect by hand")
+    if "handoff written" not in out or "retired" not in out:
+        fail(f"handoff --write --retire should report both: {out}")
+
+    doc = q.js("handoff", "--json")
+    if not doc["exists"]:
+        fail("handoff --json should find the document it just wrote")
+    text = doc["text"]
+    for needle in (t1, "review", t2, "staging API key", t3,
+                   "worker-a's fix is unverified", "tasks since --cursor",
+                   "Pick this up"):
+        if needle not in text:
+            fail(f"handoff document is missing {needle!r}")
+    if f"--cursor {doc['cursor']}" not in text:
+        fail("the handoff must carry a cursor the next planner can resume from")
+
+    if q.out("handoff", "--show") != text:
+        fail("--show and the default must print the same document")
+    if "handoff on file" not in q.out("board"):
+        fail("the board should tell a fresh session a handoff is waiting")
+
+    # retired means retired: a watcher armed afterwards exits instead of lurking
+    res = q.run("await", "--agent", "planner", "--poll", "0.2", "--timeout", "5s",
+                "--no-supervisor", check=False)
+    if res.returncode != 2:
+        fail("--no-supervisor should watch without a lease")
+    p = _await(tmp, "--timeout", "10s")
+    out, _ = p.communicate(timeout=20)
+    if p.returncode not in (0, 2, 4):
+        fail(f"unexpected watcher exit {p.returncode}: {out}")
+
+
 def main():
     for test in (test_lifecycle, test_leases, test_tiers, test_resources,
                  test_doctor, test_mutex, test_concurrent_logs,
-                 test_utf8_discipline, test_note_append, test_config_overlay):
+                 test_utf8_discipline, test_note_append, test_config_overlay,
+                 test_journal, test_await_wakes_only_on_decisions,
+                 test_await_quiet_and_blocked, test_supervisor_lease,
+                 test_handoff):
         tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
         try:
             test(tmp)

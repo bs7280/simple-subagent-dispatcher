@@ -17,6 +17,8 @@ SCRIPTS = os.path.abspath(os.path.join(HERE, os.pardir, "scripts"))
 TASKS = os.path.join(SCRIPTS, "tasks.py")
 DISPATCH = os.path.join(SCRIPTS, "dispatch.py")
 PY = sys.executable
+sys.path.insert(0, SCRIPTS)
+import tasks as tasks_mod  # noqa: E402  -- for the detected-runner assertion
 
 FAKE_CLAUDE = """\
 import os, sys, time
@@ -97,9 +99,9 @@ def run_all(tmp):
     t1 = tasksc("create", "Dispatched task", "--body", "do it").stdout.split()[1]
     t2 = tasksc("create", "Worktree task").stdout.split()[1]
 
-    # composed prompt: default uv runner, death-mode ban, claim step
+    # composed prompt: detected default runner, death-mode ban, claim step
     out = disp("prompt", t1).stdout
-    if "uv run python" not in out:
+    if " ".join(tasks_mod.detect_runner()) not in out:
         fail("default runner missing from composed prompt")
     if "NEVER launch a long-running command" not in out:
         fail("prompt missing death-mode ban")
@@ -272,6 +274,14 @@ def run_all(tmp):
         fail(f"outbox content not folded into note:\n{note}")
     if "-> review (outbox sentinel)" not in note:
         fail("sentinel transition not logged")
+    # the fold is the worker -> planner signal path: it must emit the same
+    # journal event a CLI status change does, or `tasks await` goes deaf to
+    # exactly the transition a planner is waiting for
+    ev = json.loads(tasksc("since", "--task", tr, "--actionable",
+                           "--json").stdout)["events"]
+    if not any(e["kind"] == "status" and e.get("to") == "review"
+               and e.get("worker") == wr for e in ev):
+        fail(f"folded review sentinel is invisible to await: {ev}")
     obr = os.path.join(repo, ".agent-tasks", "runtime", "outbox", f"{wr}.md")
     if os.path.isfile(obr) or not os.path.isfile(obr[:-3] + ".folded.md"):
         fail("outbox should be archived to .folded.md in the fold")
@@ -293,6 +303,11 @@ def run_all(tmp):
     t = json.loads(tasksc("show", tbk, "--json").stdout)
     if t["status"] != "open" or "need API key" not in t["blockers"]:
         fail(f"blocked sentinel should reopen with the blocker recorded: {t}")
+    ev = json.loads(tasksc("since", "--task", tbk, "--actionable",
+                           "--json").stdout)["events"]
+    if not any(e["kind"] == "block" and "need API key" in e.get("blockers", [])
+               for e in ev):
+        fail(f"a worker's question must reach the planner's watcher: {ev}")
 
     # ---- auto-heartbeat: supervisor keeps a live worker's lease fresh ----
     set_cfg("sleepy", lease_minutes=0.02)  # 1.2s lease vs a 5s worker

@@ -10,6 +10,8 @@ index plus one markdown note per task.
 your-repo/
   .agent-tasks/
     index.json           # metadata: status, assignee, blockers, priority, tags
+    events.jsonl         # append-only journal: what changed, in order
+    handoff.md           # the last planner's briefing for the next one
     tasks/
       TASK-001.md        # one note per task: description, criteria, notes, work log
       TASK-002.md
@@ -45,9 +47,10 @@ you want the dispatcher) anywhere; zero dependencies (Python ≥ 3.8).
 
 ## Requirements & compatibility
 
-- **Python ≥ 3.8, stdlib only** — no runtime dependencies, ever. The canonical
-  interpreter invocation is **`uv run python`**, set as config `runner`
-  (change it to `["python"]` or an absolute interpreter if you don't use uv).
+- **Python ≥ 3.8, stdlib only** — no runtime dependencies, ever. The
+  interpreter invocation is the config `runner`; when unset it auto-detects —
+  **`uv run python`** if uv is installed, else the best `python3`/`py`/`python`
+  on PATH (pin it explicitly if you want a specific interpreter).
   Everything the system composes — worker prompts, permission pre-approvals,
   the bootstrap invocation — is built from the same `runner`, so they cannot
   drift apart.
@@ -113,7 +116,11 @@ queue at any time.
 | `assign ID NAME` | set assignee |
 | `log ID MESSAGE` | append a timestamped work-log entry to the note |
 | `note ID [--append [--file F] --agent X]` | print the note's path — or `--append` a stamped block (stdin or `--file`) into its `## Notes` section under the queue lock: the direct-agent equivalent of the worker outbox |
-| `board [--json]` | one-screen status overview |
+| `board [--json]` | one-screen status overview, plus the journal cursor, who's supervising, and whether a handoff is waiting |
+| `since [--cursor N] [--task ID] [--kind K] [--actionable] [--limit N] [--json]` | journal delta: what changed after cursor N — the cheap way for a planner to catch up instead of re-reading the board and every note |
+| `await [--for TRIGGERS] [--cursor N] [--timeout 4h] [--debounce S] [--takeover] [--json]` | block until the queue holds a **decision**, then print one digest and exit (0 = wake, 2 = quiet timeout, 4 = superseded/retired). Ignores narration, heartbeats and your own writes; debounces bursts into a single wake |
+| `supervisor [show\|claim\|release\|retire] [--takeover] [--note]` | the one-watcher-per-queue lease: who is watching, and how supervision is taken over or ended |
+| `handoff [--show] [--write --note/--file [--retire]] [--json]` | read (or compose) the planner handoff document: what needs a decision, what's in flight, what's ready, the repo's state, the cursor, and the outgoing planner's intent |
 | `lock NAME --agent X` / `unlock NAME --agent X` | named mutex for shared-checkout spans (e.g. `lock commit`); exit 4 = BUSY naming the holder; stale locks stolen after `mutex_stale_minutes` (default 30) |
 | `doctor [--fix]` | integrity report: index/note status drift, orphan claims, stray/missing notes; exit 1 on findings (`--fix` rewrites drifted frontmatter from the index) |
 
@@ -314,12 +321,106 @@ so it never ends up committed. Projects that prefer to keep the queue out of
 version control (e.g. heavy multi-branch work where the index would conflict)
 can gitignore the folder instead — that's a per-project call.
 
+## The planner is the expensive one
+
+Workers are cheap and replaceable — that is the whole point of keeping state in
+files. The planner is neither. Its context grows all session, and **every wake
+re-reads all of it**: a background watcher exiting, a file watcher tripping, a
+notification that a commit landed. Dogfooding surfaced the bill this design
+was missing:
+
+- a planner woken **by its own writes** — it commits, and its own watcher pops;
+- a planner woken by **another session's** writes — you open a fresh chat the
+  next morning, touch the queue, and yesterday's half-full planner wakes up to
+  watch you work;
+- a planner woken **repeatedly through a long tail of slow work**, paying a
+  full context re-read each time to learn that an hour-long build is still an
+  hour-long build.
+
+None of those wakes carried a decision. Three commands fix that, and the
+planner skill now teaches them as lifecycle, not options.
+
+### `tasks await` — one wake, one payload
+
+```
+$ tasks await --agent planner
+await[planner]: /repo/.agent-tasks
+  triggers: blocked,create,needs-resume,review   cursor: 128   poll 5s   debounce 20s   timeout 4h
+  live workers: worker-auth, worker-db
+WAKE: 1 blocked, 2 review  (waited 41m, cursor 128 -> 139)
+  TASK-004   review       worker-auth    status: in_progress -> review
+  TASK-006   review       worker-db      status: in_progress -> review
+  TASK-007   blocked      worker-api     blocked on: need the staging API key
+next: tasks show TASK-004; tasks show TASK-006
+      tasks list  (free-text blockers are questions for you)
+      tasks since --cursor 128   # full delta, cheap
+```
+
+What makes it cheap is what it refuses to wake for: work-log narration, lease
+heartbeats, claims, and **anything the supervisor itself wrote**. What it
+wakes for is a decision — a task entering `review`, a worker's free-text
+blocker (a question addressed to the planner), a task a worker filed, a worker
+that died mid-task, or a batch draining. Three workers finishing within the
+debounce window produce **one** wake carrying all three, not three wakes.
+
+Exit codes are the contract: `0` a digest to act on, `2` quiet timeout (which
+prints the nudge to hand off rather than wait again), `4` superseded or
+retired — stop, do not re-arm.
+
+### `tasks supervisor` — exactly one watcher per queue
+
+The stale-watcher problem is an ownership problem, so the queue has one
+supervisor slot. `await` claims it on start; a newer session claiming it bumps
+the generation, and the older watcher **exits on its next poll** instead of
+lurking to pop on someone else's change. A different agent's still-fresh lease
+is a conflict (exit 4, holder named) unless you pass `--takeover`. A lease
+nobody refreshes goes stale after `supervisor_ttl_minutes` and shows up in
+`tasks doctor` as an abandoned squatter rather than silently blocking the next
+planner.
+
+So yesterday's session gets woken exactly once — to be told it is no longer
+supervising — instead of every time you touch the repo today.
+
+### `tasks handoff` — a planner that knows when to die
+
+The advanced half: a planner that is out of useful context, or facing hours of
+unattended work, should **end deliberately** rather than linger as an
+expensive observer.
+
+```
+tasks handoff --write --retire --agent planner \
+  --note "worker-a's auth fix is unverified — check the redirect by hand.
+          TASK-009 is sequenced last on purpose: it resets the dev DB."
+```
+
+`--write` composes the machine facts (what needs a decision, what's in flight
+and under which worker, what's ready to dispatch, branch/HEAD/dirty state, the
+journal cursor) into `.agent-tasks/handoff.md`. `--note` adds the only part
+the queue cannot reconstruct: what the planner knew that the files don't.
+`--retire` marks the queue unsupervised, so every live watcher exits and
+nothing wakes the session again.
+
+Overnight the dispatched workers keep running headless. In the morning a fresh
+planner boots from the document instead of resurrecting a spent session:
+
+```
+tasks handoff --show                         # the briefing
+tasks since --cursor 139 --actionable        # what happened after it
+tasks board                                  # current state
+```
+
+That is a few hundred tokens of context, not a few hundred thousand — and it
+is *deliberate* state, written by a planner that chose its moment, rather than
+whatever happened to still be in a transcript.
+
 ## What's in the plugin
 
 - **`task-planner` skill** — break work into self-contained task notes,
   sequence with blockers (including serializing exclusive resources: DB
   migrations, shared dev DB resets, browser/e2e — chain them, don't parallelize
-  them), dispatch workers, monitor, review.
+  them), dispatch workers, monitor, review. Also the planner's own lifecycle:
+  boot from the handoff document, wait with `await` (one wake per decision),
+  and hand off + retire instead of lingering as an expensive observer.
 - **`task-worker` skill** — claim one task, work only that scope, narrate into
   the work log, block-and-stop instead of guessing, finish to `review`. Bans
   the known headless death mode: launching a long command in the background

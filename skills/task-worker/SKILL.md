@@ -16,9 +16,11 @@ uv run python "${CLAUDE_PLUGIN_ROOT}/scripts/tasks.py" <command>
 ```
 
 If `CLAUDE_PLUGIN_ROOT` is not set, the plugin root is the directory two levels
-above this SKILL.md file. `uv run python` is the canonical interpreter
-invocation; if the project's `.agent-tasks/config.json` sets a different
-`runner`, use that instead. Below, `tasks` means that command.
+above this SKILL.md file. Interpreter: honor the project's
+`.agent-tasks/config.json` `runner` if set; otherwise `uv run python`, and if
+`uv` is not installed fall back to `python3` (Windows: `py -3` or `python`) --
+the script is stdlib-only and runs on any Python >= 3.8. Below, `tasks`
+means that command.
 
 Your agent name: use what the dispatch prompt assigned you (e.g.
 `worker-auth`); otherwise pick a short stable one. Pass it as
@@ -105,6 +107,9 @@ A crashed holder's lock goes stale and is stolen automatically after
 ## Hard rules
 
 - One task. Yours. Only.
+- `await`, `supervisor` and `handoff` are the planner's commands — never run
+  them. Supervision and handoffs are not your job, and claiming the supervisor
+  lease would silently retire the planner's watcher.
 - Never launch a long command in the background and end your turn "waiting"
   for it — headless sessions are never re-invoked when it finishes, so that is
   death, not patience. Run long commands in the foreground and wait for them.
