@@ -531,8 +531,8 @@ What this buys: the same worker prompt works for a Claude Code session, a
 different harness, or a locked-down sandbox with no network — the worker only
 ever touches files, and whatever process holds the credentials (the
 dispatcher, a cron, a parent session) does the pushing. A reference bridge
-for a markdown vault (seed the linked ticket, publish the run as a child note
-`<ticket>.runs.<worker-id>`) lives in the author's
+for a markdown vault (seed the linked ticket, publish the worker's record as a
+child note `<ticket>.agent-workers.<worker-id>`) lives in the author's
 [claude-tools](https://github.com/bs7280) repo under `skills/agent-tasks-vault/`.
 
 ## Roadmap

@@ -1035,9 +1035,12 @@ def cmd_sync(args):
             print(sync_worker(root, cfg, wid, w, "exited",
                               fold_outcome(root, w, applied), outbox=outbox))
             continue
-        # ...otherwise it was folded earlier: re-push from the archived outbox
+        # ...otherwise it was folded earlier: re-push from the archived outbox.
+        # The task's status stands in for the lost sentinel: review, and done
+        # (a reviewer accepted what the worker parked), both mean the worker
+        # finished to review.
         task = index["tasks"].get(w["task"], {})
-        if task.get("status") == "review":
+        if task.get("status") in ("review", "done"):
             outcome = "review"
         elif task.get("status") == "in_progress" and task.get("assignee") == w["agent"]:
             outcome = "died"
