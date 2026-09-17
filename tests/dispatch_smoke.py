@@ -546,6 +546,11 @@ def run_all(tmp):
     phases = [(r["kind"], r["payload"]["phase"], r["payload"].get("outcome")) for r in recs]
     if ("sync", "running", None) not in phases:
         fail(f"live sync while the worker was running never fired: {phases}")
+    running = [r["payload"]["changed"] for r in recs if r["payload"]["phase"] == "running"]
+    if True not in running or False not in running:
+        fail(f"running ticks should fire on quiet AND changed intervals, flagged: {running}")
+    if not all(r["payload"]["changed"] for r in recs if r["payload"]["phase"] != "running"):
+        fail("start/exited syncs always carry changed=true")
     exited = [r for r in recs if r["kind"] == "sync" and r["payload"]["phase"] == "exited"]
     if len(exited) != 1:
         fail(f"exactly one exited sync per fold, got {len(exited)}: {phases}")

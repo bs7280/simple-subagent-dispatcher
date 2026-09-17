@@ -249,6 +249,9 @@ def build_prompt(root, tid, agent, extra, cfg, outbox, workspace):
 #
 #   {"event": "seed"|"sync", "phase": "start"|"running"|"exited",
 #    "outcome": null | "review" | "blocked: <reason>" | "died" | "ended",
+#    "changed": true|false   (running: did the outbox/workspace change since
+#                             the last tick? -- push content, or just a
+#                             heartbeat, is the hook's call),
 #    "queue": <.agent-tasks path>, "repo": <repo path>,
 #    "task": {<index entry: id, title, status, remote, ...>},
 #    "note": <task note path>, "outbox": <outbox path>,
@@ -260,14 +263,14 @@ def build_prompt(root, tid, agent, extra, cfg, outbox, workspace):
 # log, never a blocked fold. Hook output is appended to the worker's spawn
 # log so `watch` shows it beside the session.
 
-def hook_payload(root, event, phase, wid, w, outcome=None, outbox=None):
+def hook_payload(root, event, phase, wid, w, outcome=None, outbox=None, changed=True):
     index = tasks.load_index(root)
     tid = w["task"]
     task = tasks.task_json(index, tid) if tid in index["tasks"] else {"id": tid}
     worker = dict(w)
     worker["id"] = wid
     return {
-        "event": event, "phase": phase, "outcome": outcome,
+        "event": event, "phase": phase, "outcome": outcome, "changed": changed,
         "queue": root, "repo": repo_of(root),
         "task": task, "note": tasks.note_path(root, tid),
         "outbox": outbox or w.get("outbox") or outbox_path(root, wid),
@@ -305,12 +308,12 @@ def run_hook(root, cfg, key, payload, wid):
     return ok, out
 
 
-def sync_worker(root, cfg, wid, w, phase, outcome=None, outbox=None):
+def sync_worker(root, cfg, wid, w, phase, outcome=None, outbox=None, changed=True):
     """Fire the sync hook for one worker (best-effort). Returns a one-line
     summary for the caller to print, or None when no hook is configured."""
     if not cfg.get("sync_hook"):
         return None
-    payload = hook_payload(root, "sync", phase, wid, w, outcome, outbox)
+    payload = hook_payload(root, "sync", phase, wid, w, outcome, outbox, changed)
     ok, out = run_hook(root, cfg, "sync_hook", payload, wid)
     first = out.splitlines()[0] if out else ""
     if ok:
@@ -898,8 +901,11 @@ def cmd_watch(args):
 
 class LiveSync:
     """Periodic sync while a supervisor (wait/watch) sits on a live worker:
-    every sync_interval_seconds, and only when the outbox or workspace has
-    changed since the last push -- a quiet worker costs nothing."""
+    the hook fires every sync_interval_seconds with `changed` telling it
+    whether the outbox or workspace moved since the last tick. A remote that
+    derives liveness from a heartbeat needs the quiet ticks too; what to do
+    on an unchanged tick (a cheap heartbeat, or nothing) is the hook's call.
+    Only changed ticks and failures are reported to the supervisor's output."""
 
     def __init__(self, root, cfg, wid, w):
         self.root, self.cfg, self.wid, self.w = root, cfg, wid, w
@@ -913,10 +919,11 @@ class LiveSync:
             return None
         self.last_at = time.time()
         mtime = workspace_mtime(self.root, self.wid, self.w)
-        if mtime <= self.last_mtime:
-            return None
-        self.last_mtime = mtime
-        return sync_worker(self.root, self.cfg, self.wid, self.w, "running")
+        changed = mtime > self.last_mtime
+        self.last_mtime = max(mtime, self.last_mtime)
+        msg = sync_worker(self.root, self.cfg, self.wid, self.w, "running",
+                          changed=changed)
+        return msg if changed or (msg and msg.startswith("warning")) else None
 
 
 def cmd_wait(args):

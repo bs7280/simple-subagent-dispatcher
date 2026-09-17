@@ -496,18 +496,20 @@ and moves the integration to the dispatcher side, behind two hooks:
 - **`sync_hook`** (config, argv list) runs with the same payload shape at
   three moments: right after spawn (`phase: start` — the remote learns the
   run exists immediately), every `sync_interval_seconds` (default 120) while
-  a supervisor (`wait`/`watch`) sits on the worker **and only if the outbox or
-  workspace changed** (`phase: running`), and once at fold (`phase: exited`,
-  with `outcome`: `review`, `blocked: <reason>`, `died`, or `ended`). It is
-  best-effort everywhere: failures are warnings in the spawn log, never a
-  blocked fold. `dispatch sync [WORKER…|--all]` fires it on demand (a cron, a
-  planner that wants the remote fresh, any supervisor that isn't
-  `wait`/`watch`).
+  a supervisor (`wait`/`watch`) sits on the worker (`phase: running`, with
+  `changed` saying whether the outbox or workspace moved since the last tick
+  — push content, or just a heartbeat, is the hook's call), and once at fold
+  (`phase: exited`, with `outcome`: `review`, `blocked: <reason>`, `died`, or
+  `ended`). It is best-effort everywhere: failures are warnings in the spawn
+  log, never a blocked fold. `dispatch sync [WORKER…|--all]` fires it on
+  demand (a cron, a planner that wants the remote fresh, any supervisor that
+  isn't `wait`/`watch`).
 - **The payload**, one JSON document on stdin:
 
   ```json
   {"event": "seed" | "sync", "phase": "start" | "running" | "exited",
    "outcome": null | "review" | "blocked: <reason>" | "died" | "ended",
+   "changed": true,
    "queue": "<.agent-tasks path>", "repo": "<repo path>",
    "task": {"id": "TASK-042", "title": "…", "status": "…", "remote": "…", "…": "…"},
    "note": "<task note path>", "outbox": "<outbox path>",
