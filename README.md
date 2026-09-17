@@ -119,7 +119,7 @@ queue at any time.
 | `note ID [--append [--file F] --agent X]` | print the note's path — or `--append` a stamped block (stdin or `--file`) into its `## Notes` section under the queue lock: the direct-agent equivalent of the worker outbox |
 | `board [--json]` | one-screen status overview, plus the journal cursor, who's supervising, and whether a handoff is waiting |
 | `since [--cursor N] [--task ID] [--kind K] [--actionable] [--limit N] [--json]` | journal delta: what changed after cursor N — the cheap way for a planner to catch up instead of re-reading the board and every note |
-| `await [--for TRIGGERS] [--cursor N] [--timeout 4h] [--debounce S] [--takeover] [--json]` | block until the queue holds a **decision**, then print one digest and exit (0 = wake, 2 = quiet timeout, 4 = superseded/retired). Ignores narration, heartbeats and your own writes; debounces bursts into a single wake |
+| `await [--for TRIGGERS] [--cursor N] [--timeout 4h] [--debounce S] [--takeover] [--json]` | block until the queue holds a **decision**, then print one digest and exit (0 = wake, 2 = quiet timeout, 4 = superseded/retired). Ignores narration, heartbeats and your own writes; debounces bursts into a single wake. Meanwhile it supervises every dispatched worker: lease heartbeats + sync ticks while alive, outbox fold on exit |
 | `supervisor [show\|claim\|release\|retire] [--takeover] [--note]` | the one-watcher-per-queue lease: who is watching, and how supervision is taken over or ended |
 | `handoff [--show] [--write --note/--file [--retire]] [--json]` | read (or compose) the planner handoff document: what needs a decision, what's in flight, what's ready, the repo's state, the cursor, and the outgoing planner's intent |
 | `lock NAME --agent X` / `unlock NAME --agent X` | named mutex for shared-checkout spans (e.g. `lock commit`); exit 4 = BUSY naming the holder; stale locks stolen after `mutex_stale_minutes` (default 30) |
@@ -266,17 +266,18 @@ So dispatched workers don't get a CLI contract at all:
 - The worker signals its terminal state with one sentinel line: `STATUS:
   review` or `STATUS: blocked: <reason>`. Tiny, forgiving grammar — one token,
   last occurrence wins, case-insensitive. Nothing else to get wrong.
-- When the dispatcher observes the exit (`wait`, `watch`, or `list`), it
-  **folds** the outbox into the task note's work log under the queue lock,
+- When the dispatcher observes the exit (`wait`, `watch`, `list`, or `tasks
+  await`), it **folds** the outbox into the task note's work log under the queue lock,
   validates the sentinel (workers can only reach `review` or `blocked` —
   `done` stays reviewer-only; a stolen task's stale sentinel is ignored), and
   applies it through the same primitives the CLI uses. `blocked: <reason>`
   reopens the task with the reason recorded as a blocker. Folding archives the
   outbox to `<worker-id>.folded.md` in the same locked span, so a crashed fold
   can never double-append. No sentinel = the existing died-mid-task handling.
-- `wait`/`watch` **auto-heartbeat** while the worker's pid is verifiably
-  alive, so dispatched workers carry no heartbeat duty (the CLI `heartbeat`
-  remains the backstop for externally-run agents).
+- `wait`/`watch` (one worker) and `tasks await` (every worker)
+  **auto-heartbeat** while the worker's pid is verifiably alive, so
+  dispatched workers carry no heartbeat duty (the CLI `heartbeat` remains
+  the backstop for externally-run agents).
 
 Net: a dispatched worker needs **zero queue-CLI calls** — task work, outbox
 writes, one sentinel line.
@@ -306,7 +307,7 @@ when it (or anything else) kills a worker anyway.
   the planner. `next`/`claim` refuse blocked tasks.
 - **Claims are leases, not locks.** `claim` stamps `claimed_at` +
   `lease_until` (config `lease_minutes`, default 90). Dispatched workers are
-  auto-heartbeated by their supervisor (`wait`/`watch`); direct/external
+  auto-heartbeated by their supervisor (`wait`/`watch`/`await`); direct/external
   agents `heartbeat` themselves during long steps. If a worker crashes, its
   lease simply expires and the task becomes claimable again — `next`/`claim` steal it and record the steal
   (old assignee, expiry time) in the work log. `board` shows expired-lease
@@ -372,6 +373,15 @@ debounce window produce **one** wake carrying all three, not three wakes.
 Exit codes are the contract: `0` a digest to act on, `2` quiet timeout (which
 prints the nudge to hand off rather than wait again), `4` superseded or
 retired — stop, do not re-arm.
+
+While it waits, `await` is also the supervisor of every dispatched worker —
+what `dispatch wait` is for one: it keeps live workers' leases fresh, ticks
+the `sync_hook` on its interval, and folds an exited worker's outbox (so a
+clean `STATUS: review` wakes you as **review**, never as a false
+needs-resume, and a linked tracker sees the exit). A worker with no
+supervisor at all — no `await`, `wait`, or `watch` — is folded by the next
+`dispatch list`/`sync`, and until then a remote that derives liveness from
+sync ticks will show it stalled.
 
 ### `tasks supervisor` — exactly one watcher per queue
 
@@ -496,14 +506,15 @@ and moves the integration to the dispatcher side, behind two hooks:
 - **`sync_hook`** (config, argv list) runs with the same payload shape at
   three moments: right after spawn (`phase: start` — the remote learns the
   run exists immediately), every `sync_interval_seconds` (default 120) while
-  a supervisor (`wait`/`watch`) sits on the worker (`phase: running`, with
+  a supervisor sits on the worker — `dispatch wait`/`watch` for one worker,
+  `tasks await` for all of them — (`phase: running`, with
   `changed` saying whether the outbox or workspace moved since the last tick
   — push content, or just a heartbeat, is the hook's call), and once at fold
   (`phase: exited`, with `outcome`: `review`, `blocked: <reason>`, `died`, or
   `ended`). It is best-effort everywhere: failures are warnings in the spawn
   log, never a blocked fold. `dispatch sync [WORKER…|--all]` fires it on
   demand (a cron, a planner that wants the remote fresh, any supervisor that
-  isn't `wait`/`watch`).
+  isn't `wait`/`watch`/`await`).
 - **The payload**, one JSON document on stdin:
 
   ```json

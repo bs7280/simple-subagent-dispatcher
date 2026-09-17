@@ -197,10 +197,15 @@ Reads, cheapest first:
   lease. Exit 1 means findings; `--fix` repairs drifted frontmatter.
 
 Dispatched workers report through per-worker **outboxes** that the dispatcher
-folds into the task note when it observes the exit (`wait`, `watch`, or
-`list`) — ending with `STATUS: review` or `STATUS: blocked: <reason>` (blocked
-reopens the task with the reason as a blocker). `wait`/`watch` also
-auto-heartbeat live workers, so a supervised worker's lease never decays.
+folds into the task note when it observes the exit (`await`, `wait`, `watch`,
+or `list`) — ending with `STATUS: review` or `STATUS: blocked: <reason>`
+(blocked reopens the task with the reason as a blocker). `await` is the
+supervisor of every dispatched worker while it waits — the same chores `wait`
+does for one: it auto-heartbeats live workers (their leases never decay),
+ticks the project's `sync_hook` on its interval (a linked tracker stays
+fresh), and folds exits (a clean finish wakes you as `review`, not as a
+false needs-resume). If you neither `await` nor `wait`, nothing does those
+chores until the next `dispatch list`/`sync`.
 
 ## 5. Review
 

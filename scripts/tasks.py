@@ -590,7 +590,8 @@ Machine-managed task queue shared by planner and worker agents
   `seed_hook` / `sync_hook` (null -- argv lists bridging a remote tracker:
   seed runs before a worker spawns and fills its workspace `seed/`; sync
   pushes the worker's outbox + workspace onward at spawn, every
-  `sync_interval_seconds` (120) while supervised, and at fold with the
+  `sync_interval_seconds` (120) while supervised (`dispatch wait`/`watch`
+  on one worker, `tasks await` on all of them), and at fold with the
   outcome; both get a JSON payload on stdin; `hook_timeout_seconds` 120).
   A task's `remote` (`create --remote`, `tasks remote ID [REF]`) is an
   opaque string only those hooks interpret.
@@ -1371,6 +1372,31 @@ def _pid_alive(pid):
     return procs.is_alive(pid)
 
 
+def dispatch_supervisor(root, cfg):
+    """The dispatcher's chores for every dispatched worker -- lease
+    heartbeats and sync ticks while alive, outbox fold on exit -- when
+    dispatch.py sits beside this file. `await` is the planner's supervisor,
+    so it must do what `dispatch wait` does for one worker, for all of them:
+    otherwise a worker finishing under `await` alone is never folded, its
+    clean STATUS: review reads as died-mid-task, and a remote that derives
+    liveness from the sync hook sees it stall. None for a standalone
+    tasks.py (nothing dispatched, nothing to supervise)."""
+    try:
+        import dispatch  # same directory; optional for a standalone tasks.py
+    except ImportError:
+        return None
+    return dispatch.BatchSupervisor(root, cfg)
+
+
+def fold_pending(root, wid):
+    """An exited worker whose outbox has not been folded yet. Its fate is
+    the fold's call -- review, blocked, or truly died -- so until a
+    supervisor folds it, it is not needs-resume material."""
+    w = dispatcher_workers(root).get(wid) or {}
+    path = w.get("outbox") or os.path.join(root, "runtime", "outbox", f"{wid}.md")
+    return os.path.isfile(path)
+
+
 def worker_snapshot(root, index):
     """(live worker ids, {dead worker id: task id}) -- dead meaning it exited
     while its task was still in_progress, i.e. `dispatch resume` material."""
@@ -1459,9 +1485,25 @@ def cmd_await(args):
     started = time.time()
     deadline = started + timeout if timeout > 0 else None
 
+    # supervisor chores for dispatched workers: heartbeat + sync while alive,
+    # fold on exit. Ticked once here, after the cursor is set and before the
+    # snapshot, so a worker that finished while nobody watched is folded now
+    # and its review/blocked event is the first thing this wake reports --
+    # not a "pre-existing" needs-resume.
+    chores = dispatch_supervisor(root, cfg)
+    chore_out = sys.stderr if args.json else sys.stdout
+
+    def do_chores():
+        for line in (chores.tick() if chores else ()):
+            print(f"  [dispatch] {line}", file=chore_out, flush=True)
+
+    do_chores()
     index = load_index(root)
     live, stuck = worker_snapshot(root, index)
-    known_stuck, saw_live = set(stuck), bool(live)
+    # a worker that exited between the chores tick and this snapshot still
+    # has its outbox: the next tick folds it, and THAT decides what it is
+    known_stuck = {wid for wid in stuck if not (chores and fold_pending(root, wid))}
+    saw_live = bool(live)
     print(f"await[{agent}]: {root}")
     print(f"  triggers: {','.join(sorted(wants))}   cursor: {cursor}   "
           f"poll {fmt_dur(poll)}   debounce {fmt_dur(debounce)}   "
@@ -1470,6 +1512,9 @@ def cmd_await(args):
         print(f"  pre-existing (not a wake): {len(known_stuck)} worker(s) already "
               f"need resume: {', '.join(sorted(known_stuck))}")
     print(f"  live workers: {', '.join(sorted(live)) if live else 'none'}")
+    if chores:
+        print("  supervising dispatched workers: heartbeat + sync while alive, "
+              "fold on exit")
 
     def finish(hits):
         by_trig = {}
@@ -1527,6 +1572,7 @@ def cmd_await(args):
                 supervisor_update(root, me)
                 last_refresh = time.time()
 
+        do_chores()                    # a fold here is journaled: read it below
         size = journal_size()          # append-only: unchanged size, nothing new
         events = []
         if size != last_size:
@@ -1548,11 +1594,13 @@ def cmd_await(args):
             live, stuck = worker_snapshot(root, index)
             if "needs-resume" in wants:
                 for wid in sorted(set(stuck) - known_stuck):
+                    if chores and fold_pending(root, wid):
+                        continue  # judged by the fold on the next tick
                     hits.append(("needs-resume",
                                  {"task": stuck[wid], "agent": wid, "ts": now(),
                                   "msg": f"worker {wid} exited with {stuck[wid]} "
                                          f"still in_progress -- resume or reassign"}))
-                known_stuck |= set(stuck)
+                    known_stuck.add(wid)
             if "drain" in wants:
                 busy = [t for t in index["tasks"].values()
                         if t["status"] == "in_progress"]

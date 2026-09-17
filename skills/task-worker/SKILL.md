@@ -40,9 +40,11 @@ task note is only a wrapper; put longer write-ups in `notes/<name>.md` and
 screenshots/artifacts in `attachments/`. All of it is collected and forwarded
 for you (to the task note, and to whatever tracker the queue is linked to).
 Queue files (the task note,
-`index.json`) are read-only to you. Finish by making the LAST line of the
-outbox exactly `STATUS: review` (after really running the acceptance checks)
-or `STATUS: blocked: <what you need>`. The dispatcher folds your outbox into
+`index.json`) are read-only to you. Write the outbox as you go — it is read
+live: first line, what you are about to do; a line per meaningful step; then
+a `## Summary` heading with one line saying what changed. Finish by making
+the LAST line of the outbox exactly `STATUS: review` (after really running
+the acceptance checks) or `STATUS: blocked: <what you need>`. The dispatcher folds your outbox into
 the task note and applies the status for you. The rest of this skill is for
 agents working the queue **directly** (self-claimed, no dispatcher).
 

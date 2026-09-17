@@ -140,6 +140,13 @@ def run_all(tmp):
         fail("prompt missing the sentinel grammar")
     if os.path.join("runtime", "outbox") not in out:
         fail("prompt should name the outbox file")
+    # outbox shape: a first line before work, a `## Summary` line before the
+    # sentinel -- a worker that writes its outbox once at the end reads as
+    # silent to everyone watching it live
+    if "FIRST, before any other work" not in out or "## Summary" not in out:
+        fail("prompt should ask for a first outbox line and a closing summary")
+    if "timeout parameter" not in out or "never wait by sleeping" not in out:
+        fail("prompt should explain the Bash timeout and the sleep ban")
 
     # stub claude; runner pinned to this interpreter so the test needs no uv
     stub = os.path.join(tmp, "fake_claude.py")
@@ -576,6 +583,62 @@ def run_all(tmp):
         fail("dispatch sync should have fired the hook again")
     if "no running workers" not in disp("sync").stdout:
         fail("dispatch sync with nothing running should say so")
+
+    # ---- `tasks await` supervises dispatched workers: heartbeat + sync while
+    # alive, fold on exit. Before 0.8.3 it did none of that: a clean
+    # STATUS: review under await alone read as a died-mid-task needs-resume,
+    # and the remote kept the worker `running` forever. ----
+    set_cfg("chatty", seed_hook=[PY, hook, "seed"], sync_hook=[PY, hook, "sync"],
+            sync_interval_seconds=1, lease_minutes=0.02)  # 1.2s lease vs a 4s worker
+    ta = tasksc("create", "Awaited task", "--remote", "tracker://item/9").stdout.split()[1]
+    wa = started_id(disp("start", ta))
+    n_before = len(hook_records())
+    watcher = subprocess.Popen([PY, TASKS, "await", "--agent", "planner", "--poll", "0.2",
+                                "--debounce", "0.4", "--timeout", "30s", "--json"],
+                               cwd=repo, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True)
+    time.sleep(2.5)  # the lease is long expired by now unless await heartbeats
+    steal = sh([PY, TASKS, "claim", ta, "--assignee", "rival"], check=False)
+    if steal.returncode == 0:
+        fail("await must auto-heartbeat live dispatched workers: a rival stole the lease")
+    out, err = watcher.communicate(timeout=30)
+    if watcher.returncode != 0:
+        fail(f"await should wake on the folded review, rc={watcher.returncode}:\n{out}\n{err}")
+    if "supervising dispatched workers" not in out:
+        fail(f"await should announce the supervision it carries: {out}")
+    wake = json.loads(out[out.index("{"):])
+    if wake["wake"] != "1 review" or [h["trigger"] for h in wake["hits"]] != ["review"]:
+        fail(f"await should fold the exit and wake for review, not needs-resume: {wake}")
+    if json.loads(tasksc("show", ta, "--json").stdout)["status"] != "review":
+        fail("await's fold should move the task to review")
+    if f"outbox of {wa} folded: review" not in err:  # --json: chores narrate on stderr
+        fail(f"await should report the fold: {err}")
+    recs = hook_records()[n_before:]
+    phases = [(r["payload"]["phase"], r["payload"].get("outcome"), r["payload"]["changed"])
+              for r in recs]
+    if not any(p[0] == "running" for p in phases):
+        fail(f"await should tick the sync hook while the worker runs: {phases}")
+    if [p for p in phases if p[0] == "exited"] != [("exited", "review", True)]:
+        fail(f"await should fire exactly one exited sync with the outcome: {phases}")
+    with open(os.path.join(repo, ".agent-tasks", "tasks", f"{ta}.md"), encoding="utf-8") as f:
+        if "midway" not in f.read():
+            fail("await's fold should land the outbox in the task note")
+    # a worker that truly died (no sentinel) under await is still needs-resume
+    set_cfg(seed_hook=[PY, hook, "seed"], sync_hook=[PY, hook, "sync"],
+            sync_interval_seconds=1)  # plain mode: sleeps 3s, writes nothing
+    tz = tasksc("create", "Dies under await", "--remote", "tracker://item/10").stdout.split()[1]
+    wz = started_id(disp("start", tz))
+    res = sh([PY, TASKS, "await", "--agent", "planner", "--poll", "0.2", "--debounce", "0.4",
+              "--timeout", "30s", "--json"], check=False)
+    wake = json.loads(res.stdout[res.stdout.index("{"):])
+    if res.returncode != 0 or wake["wake"] != "1 needs-resume":
+        fail(f"a sentinel-less exit under await must wake needs-resume: {res.stdout}\n{res.stderr}")
+    died = [r for r in hook_records() if r["payload"]["worker"]["id"] == wz
+            and r["payload"]["phase"] == "exited"]
+    if [r["payload"]["outcome"] for r in died] != ["died"]:
+        fail(f"the died exit should reach the sync hook once: {died}")
+    set_cfg("chatty", seed_hook=[PY, hook, "seed"], sync_hook=[PY, hook, "sync"],
+            sync_interval_seconds=1)
 
     # seed failure aborts the dispatch and reverts the pre-claim
     tf = tasksc("create", "Seed fails", "--remote", "FAIL").stdout.split()[1]

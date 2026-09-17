@@ -180,9 +180,17 @@ You do not need to run any queue commands.
 
 YOUR OUTBOX -- the one file you report through:
   {outbox}
-Write progress notes, findings, and decisions there as you go, as plain
-markdown, with your ordinary file tools. It is yours alone -- nobody else
-writes to it -- and it is folded into the task note for you afterwards.
+It is read LIVE: your supervisor and the tracker this queue is linked to see
+it while you work, so write it as you go, not once at the end -- plain
+markdown, ordinary file tools, appending rather than rewriting. Its shape:
+  1. FIRST, before any other work: one line saying what you are about to do.
+  2. As you go: a line per meaningful step -- what you did, what you found,
+     what you decided. Anything longer than a few lines goes in notes/
+     (below), with a one-line pointer here.
+  3. LAST, right before the STATUS line: a `## Summary` heading and ONE line
+     saying what changed -- it is shown wherever this work is listed.
+It is yours alone -- nobody else writes to it -- and it is folded into the
+task note for you afterwards.
 
 YOUR WORKSPACE -- a directory that is yours alone:
   {workspace}
@@ -191,8 +199,12 @@ YOUR WORKSPACE -- a directory that is yours alone:
                 spec and the task note is only a wrapper around it.
   notes/        longer write-ups, one markdown file each (a test report, a
                 design note, a decision record). The outbox stays the running
-                journal; anything bigger than a few lines goes here.
-  attachments/  screenshots and other artifacts you produced or verified with.
+                journal; anything bigger than a few lines goes here. When you
+                verified something -- ran a suite, checked a page -- the full
+                evidence (what you ran, what it showed) is a note here and
+                the outbox holds the pointer.
+  attachments/  screenshots and other artifacts you produced or verified with
+                (save them here, never in the repo).
 Everything in your outbox and workspace is collected and forwarded for you --
 to the task note, and to whatever tracker this queue is linked to.
 
@@ -200,7 +212,8 @@ Queue state is read-only to you: never edit the task note, index.json, or
 anything else under {root}. Your outbox and workspace are the sanctioned
 places to write.
 
-When you finish, the LAST line of your outbox must be exactly one of:
+When you finish, the LAST line of your outbox (after the `## Summary` line)
+must be exactly one of:
   STATUS: review
   STATUS: blocked: <what you need>
 Use review only after actually running the note's acceptance checks; record
@@ -214,7 +227,11 @@ Rules:
   itch? Describe it in your outbox for the planner instead of fixing it.
 - NEVER launch a long-running command in the background and end your turn
   "waiting" for it. Headless sessions are not re-invoked when background work
-  finishes -- run long commands in the foreground.
+  finishes -- run long commands in the foreground. The Bash tool gives up
+  after 2 minutes unless you pass its timeout parameter (10 minutes max):
+  give builds and test suites an explicit timeout and split anything longer
+  into steps. A foreground sleep is blocked, so never wait by sleeping --
+  poll with short commands instead.
 - Never touch DB migrations, permissions/financial data, force pushes, or
   deploys unless the task note explicitly says to.
 - Only if the note tells you to commit and you share the checkout with other
@@ -228,10 +245,12 @@ Re-read the task note ({note}) -- any earlier outbox content of yours was
 already folded into its Work log -- your outbox ({outbox}) and your workspace
 ({workspace}: seed/ is your context, notes/ and attachments/ are yours to
 write). Check the working tree state (git status, git diff), then continue
-exactly where you left off, per your original instructions: progress goes in
-your outbox, and its LAST line must end up as the STATUS sentinel
-(STATUS: review, or STATUS: blocked: <what you need>). The task remains
-claimed for you; your supervisor keeps the claim alive."""
+exactly where you left off, per your original instructions: first one outbox
+line saying where you are resuming from, then progress as you go, and its
+LAST lines must end up as a `## Summary` heading with ONE line saying what
+changed, then the STATUS sentinel (STATUS: review, or STATUS: blocked: <what
+you need>). The task remains claimed for you; your supervisor keeps the
+claim alive."""
 
 
 def build_prompt(root, tid, agent, extra, cfg, outbox, workspace):
@@ -412,11 +431,15 @@ def fold_outbox(root, wid, w):
     return applied
 
 
-def maybe_fold(root, workers, wid, cfg=None):
+def _say(msg):
+    print(msg, file=sys.stderr if msg.startswith("warning") else sys.stdout)
+
+
+def maybe_fold(root, workers, wid, cfg=None, report=_say):
     """Fold an exited worker's outbox, if it has one waiting -- and, exactly
     once per fold, push the final state onward through the sync hook (the
     fold archives the outbox, so a second observer finds nothing to fold and
-    fires nothing)."""
+    fires nothing). The sync hook's one-line result goes to `report`."""
     w = workers[wid]
     if worker_state(w) == "running":
         return None
@@ -427,7 +450,7 @@ def maybe_fold(root, workers, wid, cfg=None):
         msg = sync_worker(root, cfg, wid, w, "exited",
                           fold_outcome(root, w, applied), outbox=outbox)
         if msg:
-            print(msg, file=sys.stderr if msg.startswith("warning") else sys.stdout)
+            report(msg)
     return applied
 
 
@@ -924,6 +947,61 @@ class LiveSync:
         msg = sync_worker(self.root, self.cfg, self.wid, self.w, "running",
                           changed=changed)
         return msg if changed or (msg and msg.startswith("warning")) else None
+
+
+class BatchSupervisor:
+    """The supervisor chores for EVERY dispatched worker, for a caller that
+    sits on the whole queue (`tasks await`) rather than on one worker
+    (`wait`/`watch`): while a worker is verifiably alive, keep its lease
+    fresh and tick its sync hook; when it exits, fold its outbox (which fires
+    the exited sync exactly once). Without this, a worker finishing under
+    `await` alone was never folded -- its clean `STATUS: review` read as a
+    died-mid-task NEEDS-RESUME and the remote kept it `running` forever.
+
+    Workers dispatched after the supervisor started are picked up on the next
+    tick (the registry is re-read each time); a resumed worker is supervised
+    again. Idle cost per tick: one registry read, one pid probe per worker,
+    and the timers."""
+
+    def __init__(self, root, cfg=None):
+        self.root = root
+        self.cfg = cfg or load_config(root)
+        self.hb_every = heartbeat_interval(self.cfg)
+        self.syncers = {}    # wid -> LiveSync (live workers only)
+        self.last_hb = {}    # wid -> epoch of the last auto-heartbeat
+        self.settled = set()  # exited workers already folded (or nothing to fold)
+
+    def tick(self):
+        """One pass over the registry. Returns the lines worth showing the
+        caller: folds, changed-content syncs, hook warnings."""
+        out = []
+        try:
+            workers = load_workers(self.root)
+        except (OSError, ValueError):
+            return out
+        for wid in sorted(workers, key=lambda k: workers[k]["started"]):
+            w = workers[wid]
+            if worker_state(w) == "running":
+                self.settled.discard(wid)  # resumed: supervise it again
+                if time.time() - self.last_hb.get(wid, 0.0) >= self.hb_every:
+                    auto_heartbeat(self.root, w, self.cfg)
+                    self.last_hb[wid] = time.time()
+                syncer = self.syncers.get(wid)
+                if syncer is None:
+                    syncer = self.syncers[wid] = LiveSync(self.root, self.cfg, wid, w)
+                msg = syncer.tick()
+                if msg:
+                    out.append(msg)
+                continue
+            if wid in self.settled:
+                continue
+            self.settled.add(wid)
+            self.syncers.pop(wid, None)
+            self.last_hb.pop(wid, None)
+            applied = maybe_fold(self.root, workers, wid, self.cfg, report=out.append)
+            if applied:
+                out.append(f"outbox of {wid} folded: {applied}")
+        return out
 
 
 def cmd_wait(args):
