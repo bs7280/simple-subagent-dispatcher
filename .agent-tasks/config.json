@@ -1,0 +1,16 @@
+{
+  "runner": ["uv", "run", "python"],
+  "worktree": true,
+  "lease_minutes": 240,
+  "permission_mode": "acceptEdits",
+  "allowed_tools": [
+    "Bash(uv run:*)", "Bash(uv sync:*)", "Bash(python3:*)", "Bash(pytest:*)",
+    "Bash(node:*)", "Bash(npm:*)", "Bash(npx:*)",
+    "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)",
+    "Bash(git add:*)", "Bash(git commit:*)", "Bash(git branch:*)", "Bash(git stash:*)",
+    "Bash(git worktree list:*)", "Bash(git cherry-pick:*)",
+    "Bash(curl:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(grep:*)", "Bash(rg:*)", "Bash(find:*)",
+    "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)", "Bash(sed -n:*)", "Bash(diff:*)", "Bash(jq:*)",
+    "Bash(mkdir:*)", "Bash(cp:*)", "Bash(pwd)", "Bash(which:*)", "Bash(date:*)"
+  ]
+}
