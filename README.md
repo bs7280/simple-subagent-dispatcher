@@ -503,6 +503,13 @@ and moves the integration to the dispatcher side, behind two hooks:
   the real spec), `notes/` (its longer write-ups, one file each), and
   `attachments/` (screenshots, artifacts). All under `runtime/`, so it is
   outside the queue-write fence and never committed.
+- **A `sync_hook` can open a reverse channel** by dropping files into
+  `workspace/inbox/` (one file per entry, numbered in arrival order) —
+  comments left for the worker while it runs. The plugin doesn't create or
+  populate this directory itself; that's on the hook. The worker prompt tells
+  every worker to list `inbox/` before each step and act on anything new, so
+  any project wiring this up gets it for free, no per-project prompt changes
+  needed.
 - **`seed_hook`** (config, argv list) runs **before spawn**, cwd = the repo,
   with a JSON payload on stdin. Its job: fill `seed/`. A non-zero exit
   **aborts the dispatch and reverts the pre-claim** — if you configured a

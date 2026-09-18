@@ -166,6 +166,8 @@ def run_all(tmp):
         fail("prompt should ask for a first outbox line and a closing summary")
     if "timeout parameter" not in out or "never wait by sleeping" not in out:
         fail("prompt should explain the Bash timeout and the sleep ban")
+    if "Before each step, list inbox/" not in out or "not an interrupt" not in out:
+        fail("prompt should tell the worker to check inbox/ between steps")
 
     # stub claude; runner pinned to this interpreter so the test needs no uv
     stub = os.path.join(tmp, "fake_claude.py")

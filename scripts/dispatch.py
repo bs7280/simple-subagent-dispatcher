@@ -233,6 +233,12 @@ YOUR WORKSPACE -- a directory that is yours alone:
 Everything in your outbox and workspace is collected and forwarded for you --
 to the task note, and to whatever tracker this queue is linked to.
 
+Before each step, list inbox/ in your workspace (it is not always present --
+only tasks bridged to an outside tracker get one). Anything new in there is a
+comment left for you while you worked: read it, acknowledge it in the outbox,
+and act on it. A comment is not an interrupt -- it arrives at a step
+boundary, not mid-step, so you will never be asked to drop what you're doing.
+
 Queue state is read-only to you: never edit the task note, index.json, or
 anything else under {root}. Your outbox and workspace are the sanctioned
 places to write.
