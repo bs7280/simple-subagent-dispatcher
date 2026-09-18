@@ -47,6 +47,13 @@ if mode == "review":
 elif mode == "blocked":
     write("half done\\nstatus: blocked: need API key\\n")
     time.sleep(0.2)
+elif mode == "blocked_then_review":
+    # first spawn (--session-id): blocks. Resumed (--resume in argv): finishes.
+    if "--resume" in sys.argv:
+        write("resumed and finished\\nSTATUS: review\\n")
+    else:
+        write("half done\\nSTATUS: blocked: need input\\n")
+    time.sleep(0.2)
 elif mode == "sleepy":
     time.sleep(5)
     write("slow but done\\nSTATUS: review\\n")
@@ -356,6 +363,123 @@ def run_all(tmp):
     if not any(e["kind"] == "block" and "need API key" in e.get("blockers", [])
                for e in ev):
         fail(f"a worker's question must reach the planner's watcher: {ev}")
+
+    # ---- TASK-017 repro: blocked -> unblock -> resume -> review ends review,
+    # the work log shows the re-claim + transition, and `tasks await` wakes.
+    # Before this fix, `resume` never re-claimed the reopened task: the
+    # worker's clean `STATUS: review` found the task still `open` and was
+    # dropped ("sentinel 'review' ignored"), so `tasks await` never woke. ----
+    set_cfg("blocked_then_review")
+    tw = tasksc("create", "Resume re-claim repro").stdout.split()[1]
+    ww = started_id(disp("start", tw))
+    res = disp("wait", ww, check=False)
+    if res.returncode != 0:
+        fail(f"blocked sentinel wait rc={res.returncode}, want 0 (not mid-task)")
+    t = json.loads(tasksc("show", tw, "--json").stdout)
+    if t["status"] != "open" or t["assignee"] != ww:
+        fail(f"blocked worker should stay assigned, task reopened: {t}")
+
+    tasksc("unblock", tw, "need input")
+    disp("resume", ww)
+    t = json.loads(tasksc("show", tw, "--json").stdout)
+    if t["status"] != "in_progress" or t["assignee"] != ww:
+        fail(f"resume should re-claim the reopened task: {t}")
+    note = open(os.path.join(repo, ".agent-tasks", "tasks", f"{tw}.md"),
+                encoding="utf-8").read()
+    if "re-claimed on resume (was open)" not in note:
+        fail(f"resume's re-claim should be logged: {note}")
+
+    # --no-supervisor: this watcher must not hold the queue's one supervisor
+    # slot past its own exit -- a later test claims it as "planner" and would
+    # wrongly get BUSY against a stale-but-not-yet-expired "planner-repro".
+    watcher = subprocess.Popen([PY, TASKS, "await", "--agent", "planner-repro",
+                                "--no-supervisor", "--for", "review", "--poll",
+                                "0.2", "--debounce", "0.4", "--timeout", "30s",
+                                "--json"],
+                               cwd=repo, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True)
+    res = disp("wait", ww, check=False)
+    if res.returncode != 0:
+        fail(f"resumed worker should finish clean, rc={res.returncode}: {res.stdout}")
+    t = json.loads(tasksc("show", tw, "--json").stdout)
+    if t["status"] != "review":
+        fail(f"the resumed worker's review sentinel should stick, not be ignored: {t}")
+    note = open(os.path.join(repo, ".agent-tasks", "tasks", f"{tw}.md"),
+                encoding="utf-8").read()
+    if "status: in_progress -> review (outbox sentinel)" not in note:
+        fail(f"work log should show the re-claim then the review transition: {note}")
+    out, err = watcher.communicate(timeout=30)
+    if watcher.returncode != 0:
+        fail(f"`tasks await --for review` should wake on the repro's review, "
+             f"rc={watcher.returncode}:\n{out}\n{err}")
+    wake = json.loads(out[out.index("{"):])
+    if wake["wake"] != "1 review":
+        fail(f"await should wake exactly once for review: {wake}")
+    set_cfg()
+
+    # ---- fold_outbox also accepts review/blocked sentinels from `open` (not
+    # just in_progress) when the assignee still matches -- defense in depth
+    # for any path that leaves the task open under its rightful assignee,
+    # independent of whether `resume` was the one that got there. ----
+    set_cfg("sleepy")  # sleeps 5s, then writes STATUS: review and exits
+    tob = tasksc("create", "Fold accepts open").stdout.split()[1]
+    wob = started_id(disp("start", tob))
+    time.sleep(0.5)
+    tasksc("status", tob, "open")  # simulate the task falling back to open
+    t = json.loads(tasksc("show", tob, "--json").stdout)
+    if t["status"] != "open" or t["assignee"] != wob:
+        fail(f"setup: task should be open with its assignee kept: {t}")
+    res = disp("wait", wob, check=False)
+    if res.returncode != 0:
+        fail(f"an open-but-owned sentinel must not read as died-mid-task: {res.returncode}")
+    t = json.loads(tasksc("show", tob, "--json").stdout)
+    if t["status"] != "review":
+        fail(f"fold should accept a review sentinel from open when the assignee matches: {t}")
+    note = open(os.path.join(repo, ".agent-tasks", "tasks", f"{tob}.md"),
+                encoding="utf-8").read()
+    if "status: open -> review (outbox sentinel)" not in note:
+        fail(f"fold should log the from-status honestly (open, not in_progress): {note}")
+    set_cfg()
+
+    # ---- the "ignored" branch still covers the genuinely foreign case (task
+    # reassigned to someone else): the sentinel is dropped, logged, and now
+    # rides `tasks await`'s existing needs-resume trigger -- a dropped
+    # sentinel is exactly the case a resume decision is needed for. ----
+    set_cfg("review")
+    tig = tasksc("create", "Foreign ignore").stdout.split()[1]
+    wig = started_id(disp("start", tig))
+    tasksc("assign", tig, "someone-else")
+    disp("wait", wig, check=False)
+    t = json.loads(tasksc("show", tig, "--json").stdout)
+    if t["assignee"] != "someone-else":
+        fail(f"a foreign worker's sentinel must not undo the reassignment: {t}")
+    note = open(os.path.join(repo, ".agent-tasks", "tasks", f"{tig}.md"),
+                encoding="utf-8").read()
+    if "sentinel 'review' ignored" not in note:
+        fail(f"a foreign sentinel should still be logged as ignored: {note}")
+    ev = json.loads(tasksc("since", "--task", tig, "--actionable",
+                           "--json").stdout)["events"]
+    if not any(e["kind"] == "ignored" and e.get("worker") == wig for e in ev):
+        fail(f"an ignored sentinel should reach the planner's watcher: {ev}")
+    set_cfg()
+
+    # ---- resume of a task that is open but assigned to someone else fails
+    # loudly instead of silently working a task it no longer owns ----
+    set_cfg("blocked")
+    tfa = tasksc("create", "Resume foreign assignment").stdout.split()[1]
+    wfa = started_id(disp("start", tfa))
+    disp("wait", wfa, check=False)  # blocks -> task open, assignee kept
+    tasksc("unblock", tfa, "need API key")
+    tasksc("assign", tfa, "rival-agent")  # planner reassigned it elsewhere
+    res = disp("resume", wfa, check=False)
+    if res.returncode == 0:
+        fail("resume of a task open but assigned elsewhere should fail")
+    if "rival-agent" not in res.stderr or tfa not in res.stderr:
+        fail(f"resume's refusal should name the task and its new assignee: {res.stderr}")
+    t = json.loads(tasksc("show", tfa, "--json").stdout)
+    if t["status"] != "open" or t["assignee"] != "rival-agent":
+        fail(f"a refused resume must not touch the task: {t}")
+    set_cfg()
 
     # ---- auto-heartbeat: supervisor keeps a live worker's lease fresh ----
     set_cfg("sleepy", lease_minutes=0.02)  # 1.2s lease vs a 5s worker

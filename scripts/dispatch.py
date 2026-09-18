@@ -427,10 +427,20 @@ def fold_outbox(root, wid, w):
         task = index["tasks"].get(tid)
         if sentinel and task:
             kind, reason = sentinel
-            if task.get("assignee") != w["agent"] or task["status"] != "in_progress":
+            from_status = task["status"]
+            # `open` is accepted alongside `in_progress`: a worker that was
+            # folded to `blocked` (-> open, assignee kept) and then unblocked
+            # still owns the task even though `cmd_resume` is what normally
+            # re-claims it to in_progress -- a sentinel that beats that
+            # re-claim (or arrives via a path that skips it) should not be
+            # dropped on the floor just because the status says `open`.
+            if task.get("assignee") != w["agent"] or from_status not in ("in_progress", "open"):
                 applied = (f"sentinel '{kind}' ignored: task is now "
                            f"{task['status']} (assignee {task.get('assignee')})")
-                tasks.append_log(root, tid, "dispatcher", applied)
+                tasks.append_log(root, tid, "dispatcher", applied, kind="ignored",
+                                 data={"worker": wid, "sentinel": kind,
+                                       "task_status": task["status"],
+                                       "assignee": task.get("assignee")})
             elif kind == "review":
                 task["status"] = "review"
                 task.pop("lease_until", None)
@@ -438,9 +448,9 @@ def fold_outbox(root, wid, w):
                 tasks.save_index(root, index)
                 tasks.set_note_status(root, tid, "review")
                 tasks.append_log(root, tid, w["agent"],
-                                 "status: in_progress -> review (outbox sentinel)",
+                                 f"status: {from_status} -> review (outbox sentinel)",
                                  kind="status",
-                                 data={"from": "in_progress", "to": "review",
+                                 data={"from": from_status, "to": "review",
                                        "worker": wid})
                 applied = "review"
             else:
@@ -455,7 +465,8 @@ def fold_outbox(root, wid, w):
                 tasks.append_log(root, tid, w["agent"],
                                  f"blocked (outbox sentinel): {reason} -- back to open",
                                  kind="block",
-                                 data={"blockers": [reason], "worker": wid})
+                                 data={"blockers": [reason], "worker": wid,
+                                       "from": from_status})
                 applied = f"blocked: {reason}"
         os.replace(procs.long_path(outbox),
                    procs.long_path(outbox[:-3] + ".folded.md"))
@@ -1120,6 +1131,32 @@ def cmd_wait(args):
         sys.exit(3)
 
 
+def _reclaim_if_open(root, cfg, tid, wid, agent):
+    """A worker resuming after its task was folded back to `open` (the
+    `blocked` sentinel, then a planner `unblock`) does not hold the claim
+    anymore -- nothing re-claims it, so its next sentinel finds the task
+    `open` and is ignored, and `tasks await` never wakes. Re-claim under the
+    lock when the assignee still matches; refuse loudly when it doesn't --
+    resuming that session would work a task it no longer owns."""
+    with tasks.Lock(root):
+        index = tasks.load_index(root)
+        task = index["tasks"].get(tid)
+        if task is None or task["status"] != "open":
+            return
+        if task.get("assignee") != agent:
+            tasks.die(f"{tid} is open but assigned to "
+                      f"{task.get('assignee') or 'nobody'}, not {agent} -- "
+                      f"resuming {wid} would work a task it no longer owns; "
+                      f"reassign or reclaim {tid} first")
+        task["status"] = "in_progress"
+        task["lease_until"] = tasks.compute_lease(cfg)
+        task["updated"] = tasks.now()
+        tasks.save_index(root, index)
+        tasks.set_note_status(root, tid, "in_progress")
+        tasks.append_log(root, tid, agent, "re-claimed on resume (was open)",
+                         kind="claim", data={"worker": wid})
+
+
 def cmd_resume(args):
     root = tasks.find_dir()
     cfg = load_config(root)
@@ -1131,6 +1168,7 @@ def cmd_resume(args):
                   f"really want to restart")
     if not os.path.isdir(w["cwd"]):
         tasks.die(f"worker cwd is gone: {w['cwd']}")
+    _reclaim_if_open(root, cfg, w["task"], wid, w["agent"])
     if not args.model and w.get("model"):
         args.model = w["model"]  # resume with the model the worker started on
     outbox = w.get("outbox") or outbox_path(root, wid)

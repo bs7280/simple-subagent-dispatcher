@@ -152,7 +152,7 @@ lacks:
 | `status WORKER [--json]` | one worker now: state, task status, and its transcript-derived **activity** — last tool + target, last words, API turns, token usage, estimated cost (`--json`: the registry facts plus the same `activity` block the sync hook receives) |
 | `watch WORKER [--follow] [--tail N] [--from-start]` | one merged timeline from both evidence streams — `[session]` transcript events beside `[spawn]` log lines (permission warnings, CLI errors), so a deny-rule warning shows up next to the tool call it explains; degrades to spawn-only when the transcript can't be located, and picks the transcript up live if it appears |
 | `wait WORKER [--timeout]` | block until it exits — exit 3 = died mid-task, 2 = timeout; on exit it folds the outbox and runs `tasks doctor`, printing findings (exit code stays task-status-driven) |
-| `resume WORKER [--prompt]` | continue a dead worker's session (default continuation prompt re-orients it: re-read task, check `git status`, carry on) |
+| `resume WORKER [--prompt]` | continue a dead worker's session (default continuation prompt re-orients it: re-read task, check `git status`, carry on); if its task was folded back to `open` (e.g. a `blocked` sentinel, then a planner `unblock`) it is re-claimed to `in_progress` first -- open but assigned to someone else fails loudly instead of resuming a task the worker no longer owns |
 | `stop WORKER` | SIGTERM; the session survives for `resume` |
 | `prompt TASK-042` | print the worker prompt without spawning (paste into any session) |
 | `sync [WORKER…\|--all]` | push workers' outbox + workspace onward through the project's `sync_hook` now (running workers by default; exited ones are folded first, or re-pushed with the outcome inferred from the task) |
@@ -369,7 +369,9 @@ What makes it cheap is what it refuses to wake for: work-log narration, lease
 heartbeats, claims, and **anything the supervisor itself wrote**. What it
 wakes for is a decision — a task entering `review`, a worker's free-text
 blocker (a question addressed to the planner), a task a worker filed, a worker
-that died mid-task, or a batch draining. Three workers finishing within the
+that died mid-task, a worker whose sentinel was dropped because the task moved
+out from under it (reassigned, or otherwise no longer `open`/`in_progress`
+under that worker), or a batch draining. Three workers finishing within the
 debounce window produce **one** wake carrying all three, not three wakes.
 
 Exit codes are the contract: `0` a digest to act on, `2` quiet timeout (which

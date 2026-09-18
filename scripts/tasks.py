@@ -528,6 +528,12 @@ def classify_event(rec):
         return "blocked"
     if kind == "create":
         return "create"
+    if kind == "ignored":
+        # a worker's sentinel was dropped on the floor (task reassigned or
+        # otherwise moved out from under it) -- exactly the case a resume
+        # decision is needed for, so it rides the existing needs-resume
+        # trigger instead of inventing a new one nobody has opted into.
+        return "needs-resume"
     return None
 
 
