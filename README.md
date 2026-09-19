@@ -286,10 +286,13 @@ writes, one sentinel line.
 
 ### The worker prompt bans the known death mode
 
-A headless worker that launches a long command in the background and ends its
-turn "waiting" **dies** — `-p` sessions are never re-invoked when background
-work finishes. The dispatch prompt bans this outright, and `resume` exists for
-when it (or anything else) kills a worker anyway.
+A headless worker that ends its turn waiting on anything that only resumes if
+the session is re-invoked — a backgrounded command, `Monitor`, a
+task/background notification, a `SendMessage` reply, `ScheduleWakeup` —
+**dies**: `-p` sessions are never re-invoked once they've ended a turn. The
+dispatch prompt bans the whole category outright and gives the positive
+alternative (run it in the foreground; poll bounded external state in short
+foreground sleeps), and `resume` exists for when a worker dies anyway.
 
 ## How coordination works
 
@@ -443,8 +446,10 @@ whatever happened to still be in a transcript.
   and hand off + retire instead of lingering as an expensive observer.
 - **`task-worker` skill** — claim one task, work only that scope, narrate into
   the work log, block-and-stop instead of guessing, finish to `review`. Bans
-  the known headless death mode: launching a long command in the background
-  and ending the turn "waiting" (headless sessions are never re-invoked).
+  the known headless death mode: ending the turn waiting on anything that
+  only resumes if the session is re-invoked (a backgrounded command,
+  `Monitor`, task/background notifications, `SendMessage` replies,
+  `ScheduleWakeup`) — headless sessions are never re-invoked.
 - **`/agent-tasks:board`** — summarize the queue: what's in review, what's
   blocked on what, who's working on what.
 - **`scripts/dispatch.py`** — the dispatcher (see above): headless workers as

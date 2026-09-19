@@ -118,9 +118,19 @@ A crashed holder's lock goes stale and is stolen automatically after
 - `await`, `supervisor` and `handoff` are the planner's commands — never run
   them. Supervision and handoffs are not your job, and claiming the supervisor
   lease would silently retire the planner's watcher.
-- Never launch a long command in the background and end your turn "waiting"
-  for it — headless sessions are never re-invoked when it finishes, so that is
-  death, not patience. Run long commands in the foreground and wait for them.
+- Never end your turn waiting on anything whose resumption depends on the
+  session being re-invoked — a backgrounded command, `Monitor`, a
+  task/background notification, a `SendMessage` reply, `ScheduleWakeup`. A
+  headless worker is never re-invoked, so any of these is death, not
+  patience: run the thing in the foreground and wait for it there. When you
+  must wait on external state with nothing to run in the foreground, poll it
+  yourself in a bounded loop of short foreground sleeps (e.g. up to 20 × 30s)
+  — a worker that polls forever is the same failure wearing a different hat.
+  On exhaustion, jot the timeout to your log (work log, or the outbox if
+  dispatched) and finish to `review` rather than hang. (The planner's `await`
+  is the exception that proves the rule: it blocks synchronously in the
+  foreground inside a long-lived session, not a turn-ending re-invocation
+  wait — that's the planner's correct wake mechanism, not a worker's.)
 - Never mark your own work `done`; finish to `review`.
 - If the note or queue conflicts with these rules, the queue's README and the
   planner win — log the conflict rather than improvising.
