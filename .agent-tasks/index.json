@@ -152,6 +152,24 @@
       "model": "sonnet",
       "remote": "repos.claude-tools.llpm.tasks.TASK-031",
       "claimed_at": "2026-09-19T22:26:15Z"
+    },
+    "TASK-012": {
+      "title": "claude-tools TASK-029: smoke.py must isolate via AGENT_TASKS_DIR; add tasks delete",
+      "status": "done",
+      "priority": "high",
+      "assignee": "task-012-f1694544",
+      "blockers": [],
+      "tags": [
+        "agent-tasks",
+        "plugin",
+        "safety"
+      ],
+      "created": "2026-09-22T01:33:33Z",
+      "updated": "2026-09-22T02:01:28Z",
+      "note": "tasks/TASK-012.md",
+      "model": "sonnet",
+      "remote": "repos.claude-tools.llpm.tasks.TASK-029",
+      "claimed_at": "2026-09-22T01:33:33Z"
     }
   }
 }
