@@ -115,6 +115,7 @@ queue at any time.
 | `done ID [--summary]` | mark done (reviewer's call, not the worker's) |
 | `block ID BLOCKER...` / `unblock ID BLOCKER...` | manage blockers |
 | `assign ID NAME` | set assignee |
+| `delete ID [--force]` (alias `rm`) | remove a task from the index and delete its note; refuses a claimed/running (`in_progress`) task unless `--force` |
 | `log ID MESSAGE` | append a timestamped work-log entry to the note |
 | `note ID [--append [--file F] --agent X]` | print the note's path — or `--append` a stamped block (stdin or `--file`) into its `## Notes` section under the queue lock: the direct-agent equivalent of the worker outbox |
 | `board [--json]` | one-screen status overview, plus the journal cursor, who's supervising, and whether a handoff is waiting |

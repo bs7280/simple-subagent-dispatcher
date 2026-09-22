@@ -948,6 +948,35 @@ def cmd_assign(args):
     print(f"{tid} assignee: {args.assignee}")
 
 
+def cmd_delete(args):
+    """Remove a task from the index and delete its note. Refuses a claimed
+    or running (in_progress) task unless --force -- the whole reason this
+    exists is so scrubbing strays never again means hand-editing index.json
+    and rm-ing note files by hand."""
+    root = find_dir()
+    agent = default_agent(args.agent)
+    with Lock(root):
+        index = load_index(root)
+        tid = resolve_id(index, args.id)
+        task = index["tasks"][tid]
+        claimed = task["status"] == "in_progress"
+        if claimed and not args.force:
+            who = task.get("assignee") or "unknown"
+            die(f"{tid} is in_progress (claimed by {who}) -- "
+                f"use --force to delete it anyway")
+        del index["tasks"][tid]
+        save_index(root, index)
+        try:
+            os.remove(note_path(root, tid))
+        except OSError:
+            pass
+        msg = "deleted"
+        if claimed:
+            msg += f" (forced past in_progress claim by {task.get('assignee')})"
+        record_event(root, tid, "delete", agent, msg)
+    print(f"deleted {tid}")
+
+
 def cmd_log(args):
     root = find_dir()
     with Lock(root):
@@ -2021,6 +2050,15 @@ def main():
     p.add_argument("assignee")
     agent_flag(p)
     p.set_defaults(func=cmd_assign)
+
+    p = sub.add_parser("delete", aliases=["rm"],
+                       help="delete a task from the index and its note "
+                            "(refuses a claimed/running task unless --force)")
+    p.add_argument("id")
+    p.add_argument("--force", action="store_true",
+                   help="delete even if the task is in_progress (claimed)")
+    agent_flag(p)
+    p.set_defaults(func=cmd_delete)
 
     p = sub.add_parser("log", help="append a work-log entry to a task's note")
     p.add_argument("id")

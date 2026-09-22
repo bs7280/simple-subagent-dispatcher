@@ -18,11 +18,30 @@ SCRIPTS_DIR = os.path.abspath(os.path.join(
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.abspath(os.path.join(HERE, os.pardir, "scripts", "tasks.py"))
+SMOKE_FILE = os.path.abspath(__file__)
 PY = sys.executable
+
+# Set when this process is itself the nested run test_ambient_env_untouched
+# drives -- stops it from spawning another nested run and recursing forever.
+NESTED_ENV_FLAG = "AGENT_TASKS_SMOKE_NESTED"
 
 
 def fail(msg):
     raise SystemExit(f"FAIL: {msg}")
+
+
+def cli_env(cwd, **overrides):
+    """The env every CLI subprocess in this suite runs under: AGENT_TASKS_DIR
+    pinned to this test's own queue dir. One place, so cwd isolation and env
+    isolation can never disagree -- an inherited AGENT_TASKS_DIR (exactly
+    what a dispatched worker has set) is the whole mechanism behind the bug
+    this file exists to catch: the env var wins over cwd in scripts/tasks.py,
+    so relying on cwd=tmp alone silently writes into whatever queue happens
+    to be ambient."""
+    env = dict(os.environ)
+    env["AGENT_TASKS_DIR"] = os.path.join(cwd, ".agent-tasks")
+    env.update(overrides)
+    return env
 
 
 class Queue:
@@ -31,12 +50,19 @@ class Queue:
     def __init__(self, tmp):
         self.cwd = tmp
 
+    def env(self, **overrides):
+        return cli_env(self.cwd, **overrides)
+
     def run(self, *args, check=True):
-        res = subprocess.run([PY, CLI, *args], cwd=self.cwd,
+        res = subprocess.run([PY, CLI, *args], cwd=self.cwd, env=self.env(),
                              capture_output=True, text=True)
         if check and res.returncode != 0:
             fail(f"tasks {' '.join(args)} -> rc={res.returncode}\n{res.stderr}")
         return res
+
+    def popen(self, *args, **kwargs):
+        return subprocess.Popen([PY, CLI, *args], cwd=self.cwd, env=self.env(),
+                                **kwargs)
 
     def out(self, *args):
         return self.run(*args).stdout
@@ -76,9 +102,8 @@ def test_lifecycle(tmp):
         fail(f"next should pick {t1}")
 
     # claim race: exactly one of two concurrent claims wins
-    procs = [subprocess.Popen([PY, CLI, "claim", t1, "--assignee", who],
-                              cwd=tmp, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL)
+    procs = [q.popen("claim", t1, "--assignee", who,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
              for who in ("racer-a", "racer-b")]
     wins = sum(p.wait() == 0 for p in procs)
     if wins != 1:
@@ -380,9 +405,8 @@ def test_concurrent_logs(tmp):
     q = Queue(tmp)
     q.run("init")
     t = q.out("create", "Log target").split()[1]
-    procs = [subprocess.Popen([PY, CLI, "log", t, f"entry-{i}", "--agent", f"w{i}"],
-                              cwd=tmp, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL)
+    procs = [q.popen("log", t, f"entry-{i}", "--agent", f"w{i}",
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
              for i in range(10)]
     if any(p.wait() != 0 for p in procs):
         fail("concurrent log invocation failed")
@@ -429,7 +453,7 @@ def test_utf8_discipline(tmp):
 
     # stdio survives a cp1252 console (the redirected-output case)
     q = Queue(tmp)
-    env = {**os.environ, "PYTHONIOENCODING": "cp1252:strict"}
+    env = q.env(PYTHONIOENCODING="cp1252:strict")
     def run_cp1252(*args):
         res = subprocess.run([PY, CLI, *args], cwd=tmp, env=env,
                              capture_output=True, text=True)
@@ -468,9 +492,9 @@ def test_note_append(tmp):
     blocks = ["first finding:\nline a\nline b", "second finding:\nline c"]
     procs = []
     for i, block in enumerate(blocks):
-        p = subprocess.Popen([PY, CLI, "note", t, "--append", "--agent", f"n{i}"],
-                             cwd=tmp, stdin=subprocess.PIPE, text=True,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        p = q.popen("note", t, "--append", "--agent", f"n{i}",
+                    stdin=subprocess.PIPE, text=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         procs.append((p, block))
     errs = [p.communicate(input=block)[1] for p, block in procs]
     if any(p.returncode != 0 for p, _ in procs):
@@ -498,9 +522,9 @@ def test_note_append(tmp):
         fail("--file append missing or unstamped")
 
     # empty input dies
-    p = subprocess.Popen([PY, CLI, "note", t, "--append", "--agent", "x"],
-                         cwd=tmp, stdin=subprocess.PIPE, text=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    p = q.popen("note", t, "--append", "--agent", "x",
+               stdin=subprocess.PIPE, text=True,
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     p.communicate(input="   ")
     if p.returncode == 0:
         fail("empty append should fail")
@@ -575,10 +599,10 @@ def test_journal(tmp):
 
 def _await(tmp, *args, agent="planner"):
     """Start a watcher; the caller drives the queue and then joins it."""
-    return subprocess.Popen(
-        [PY, CLI, "await", "--agent", agent, "--poll", "0.2",
-         "--debounce", "0.4", "--json", *args],
-        cwd=tmp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return Queue(tmp).popen(
+        "await", "--agent", agent, "--poll", "0.2",
+        "--debounce", "0.4", "--json", *args,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
 def test_await_wakes_only_on_decisions(tmp):
@@ -788,19 +812,167 @@ def test_remote(tmp):
         fail("remote frontmatter must not trip doctor")
 
 
+def test_delete(tmp):
+    """`delete` (alias `rm`) is the whole reason strays used to mean
+    hand-editing index.json and rm-ing note files: it must actually remove
+    both, refuse a claimed/running task without --force, and say who holds
+    the claim."""
+    q = Queue(tmp)
+    q.run("init")
+    t1 = q.out("create", "Open task").split()[1]
+    t2 = q.out("create", "Claimed task").split()[1]
+    t3 = q.out("create", "Aliased delete").split()[1]
+    note1 = os.path.join(tmp, ".agent-tasks", "tasks", f"{t1}.md")
+
+    q.run("claim", t2, "--assignee", "worker-a")
+    res = q.run("delete", t2, check=False)
+    if res.returncode == 0:
+        fail("delete of an in_progress task should refuse without --force")
+    if "in_progress" not in res.stderr or "worker-a" not in res.stderr:
+        fail(f"refusal should name the status and claimant: {res.stderr}")
+    if q.js("show", t2, "--json")["status"] != "in_progress":
+        fail("refused delete must not have touched the task")
+
+    q.run("delete", t2, "--force")
+    if os.path.exists(os.path.join(tmp, ".agent-tasks", "tasks", f"{t2}.md")):
+        fail("--force delete should still remove the note file")
+    if q.run("show", t2, check=False).returncode == 0:
+        fail("deleted task should no longer be showable")
+
+    # open (unclaimed) tasks delete cleanly, by bare numeric id
+    q.run("delete", "1")
+    if os.path.exists(note1):
+        fail("delete should remove the note file")
+    ids = {t["id"] for t in q.js("list", "--all", "--json")}
+    if t1 in ids:
+        fail("deleted task should be gone from the index")
+
+    # alias
+    q.run("rm", t3)
+    if q.run("show", t3, check=False).returncode == 0:
+        fail("rm alias should behave like delete")
+
+    ev = [e for e in q.js("since", "--json")["events"] if e["kind"] == "delete"]
+    if len(ev) != 3:
+        fail(f"each delete should be journaled: {ev}")
+
+    if q.run("delete", "TASK-999", check=False).returncode == 0:
+        fail("delete of an unknown id should fail")
+
+
+def _ambient_queue_state(path):
+    """(task ids in the index, note filenames on disk) for `path`, or None
+    for either half that can't be read. Identity by id/filename set, not by
+    bytes: an ambient AGENT_TASKS_DIR may be a genuinely live queue with its
+    own concurrent writer (e.g. a dispatcher heartbeating this very worker's
+    lease), so existing tasks legitimately change underneath us. What must
+    never happen is a task appearing or disappearing -- that's the suite
+    itself creating/deleting, the exact bug this guards against."""
+    index = os.path.join(path, "index.json")
+    try:
+        with open(index, encoding="utf-8") as f:
+            tasks = frozenset(json.load(f).get("tasks", {}))
+    except (OSError, ValueError):
+        tasks = None
+    notes_dir = os.path.join(path, "tasks")
+    try:
+        notes = frozenset(os.listdir(notes_dir))
+    except OSError:
+        notes = None
+    return tasks, notes
+
+
+def _ambient_queue_snapshot():
+    """Snapshot of whatever AGENT_TASKS_DIR happens to be set to when this
+    process starts, so the top-of-main guard can tell whether the run added
+    or removed tasks in it. None means nothing ambient to guard."""
+    path = os.environ.get("AGENT_TASKS_DIR")
+    if not path:
+        return None
+    return (path,) + _ambient_queue_state(path)
+
+
+def _guard_ambient_queue_untouched(snapshot):
+    """Fail loudly -- not a quiet pass -- if this run created or deleted a
+    task in the ambient AGENT_TASKS_DIR instead of confining itself to its
+    own per-test temp dirs. This is the exact failure mode of the bug this
+    suite exists to catch: a dispatched worker inherits AGENT_TASKS_DIR
+    pointing at the live queue, and without this guard a leak would show up
+    only as stray tasks in `git status`, with the suite itself still
+    printing all-clear."""
+    if snapshot is None:
+        return
+    path, tasks_before, notes_before = snapshot
+    tasks_after, notes_after = _ambient_queue_state(path)
+    if tasks_after != tasks_before or notes_after != notes_before:
+        fail(f"the ambient AGENT_TASKS_DIR ({path}) gained or lost a task "
+             "during this run -- some subprocess escaped per-test isolation. "
+             "Every subprocess.run/Popen in this file must go through "
+             "cli_env()/Queue.popen().")
+
+
+def test_ambient_env_untouched(tmp):
+    """Regression for the incident this whole file's isolation exists to
+    prevent: a dispatched worker's ambient AGENT_TASKS_DIR pointing at a
+    real queue while the full smoke suite runs. Drives an actual nested run
+    of this file with AGENT_TASKS_DIR pinned to a scratch queue -- exactly
+    what a dispatched worker inherits -- and asserts the scratch queue comes
+    out byte-identical. Fails against pre-fix code, where every test's
+    subprocess.run/Popen inherited that env var and wrote straight into it."""
+    if os.environ.get(NESTED_ENV_FLAG):
+        return  # this process IS the nested run being driven; don't recurse
+    scratch = tempfile.mkdtemp(prefix="agent-tasks-smoke-scratch-")
+    try:
+        env = cli_env(scratch)
+        init = subprocess.run([PY, CLI, "init"], cwd=scratch, env=env,
+                              capture_output=True, text=True)
+        if init.returncode != 0:
+            fail(f"scratch queue init failed: {init.stderr}")
+        index_path = os.path.join(scratch, ".agent-tasks", "index.json")
+        with open(index_path, "rb") as f:
+            before = f.read()
+
+        nested_env = dict(env)
+        nested_env[NESTED_ENV_FLAG] = "1"
+        res = subprocess.run([PY, SMOKE_FILE], env=nested_env,
+                             capture_output=True, text=True, timeout=300)
+        if res.returncode != 0 or "ALL SMOKE TESTS PASSED" not in res.stdout:
+            fail("nested smoke run under an ambient AGENT_TASKS_DIR did not "
+                 f"pass cleanly (rc={res.returncode}):\n{res.stdout}\n{res.stderr}")
+
+        with open(index_path, "rb") as f:
+            after = f.read()
+        if after != before:
+            fail("the scratch queue's index.json changed during the nested "
+                 "run -- isolation leaked into the ambient AGENT_TASKS_DIR")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def main():
-    for test in (test_lifecycle, test_leases, test_tiers, test_resources,
-                 test_doctor, test_mutex, test_concurrent_logs,
-                 test_utf8_discipline, test_note_append, test_config_overlay,
-                 test_journal, test_await_wakes_only_on_decisions,
-                 test_await_quiet_and_blocked, test_supervisor_lease,
-                 test_handoff, test_remote):
-        tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
-        try:
-            test(tmp)
-            print(f"ok: {test.__name__}")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+    # Guard: whatever AGENT_TASKS_DIR is set to when this process starts (a
+    # dispatched worker always has one, pointing at the live queue) must gain
+    # and lose no tasks. Snapshotting it here -- before any test runs -- and
+    # checking it in the finally below is what turns a regression in the
+    # per-test isolation above into a loud, immediate failure instead of
+    # silent corruption of whatever queue happens to be ambient.
+    ambient = _ambient_queue_snapshot()
+    tests = (test_lifecycle, test_leases, test_tiers, test_resources,
+             test_doctor, test_mutex, test_concurrent_logs,
+             test_utf8_discipline, test_note_append, test_config_overlay,
+             test_journal, test_await_wakes_only_on_decisions,
+             test_await_quiet_and_blocked, test_supervisor_lease,
+             test_handoff, test_remote, test_delete, test_ambient_env_untouched)
+    try:
+        for test in tests:
+            tmp = tempfile.mkdtemp(prefix="agent-tasks-smoke-")
+            try:
+                test(tmp)
+                print(f"ok: {test.__name__}")
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+    finally:
+        _guard_ambient_queue_untouched(ambient)
     print("ALL SMOKE TESTS PASSED")
 
 

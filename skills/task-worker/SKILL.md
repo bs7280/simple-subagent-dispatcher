@@ -115,6 +115,10 @@ A crashed holder's lock goes stale and is stolen automatically after
 ## Hard rules
 
 - One task. Yours. Only.
+- Running a repo's own test suite inside a dispatched worker can touch the
+  live queue (you always have `AGENT_TASKS_DIR` set to it) — isolate
+  `AGENT_TASKS_DIR` first (unset it and run from a temp cwd, or point it at a
+  scratch queue), and check `git status` on `.agent-tasks/` before committing.
 - `await`, `supervisor` and `handoff` are the planner's commands — never run
   them. Supervision and handoffs are not your job, and claiming the supervisor
   lease would silently retire the planner's watcher.

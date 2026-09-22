@@ -1,6 +1,6 @@
 {
   "name": "agent-tasks",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "File-based task queue + planner/worker skills for coordinating multiple Claude Code agents through a folder in your repo",
   "author": {
     "name": "Ben Shaughnessy"
