@@ -1,7 +1,7 @@
 ---
 id: TASK-011
 title: claude-tools TASK-031: worker prompt forbids every re-invocation wait, not just background commands
-status: review
+status: done
 created: 2026-09-19T22:25:46Z
 remote: repos.claude-tools.llpm.tasks.TASK-031
 ---
@@ -76,3 +76,5 @@ _(worker scratch space -- findings, decisions, open questions)_
     
     STATUS: review
 - 2026-09-19T22:33:16Z [task-011-7344c4cc] status: in_progress -> review (outbox sentinel)
+- 2026-09-22T00:12:45Z [mission-control] llpm ticket verified and flipped complete in the 2026-09-19 mission-control cycle; wrapper closed in the 2026-09-21 hygiene pass
+- 2026-09-22T00:12:45Z [mission-control] status: review -> done
