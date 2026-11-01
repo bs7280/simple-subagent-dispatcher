@@ -221,6 +221,32 @@ def outcome_tag(outcome):
     return "· " + (outcome or "ended")
 
 
+def settle_pane(pane_id, max_wait=12.0, hold=2):
+    """Poll `pane get` until herdr's terminal_title for the pane has changed
+    from its initial value and then stayed the same for `hold` consecutive
+    polls (1 s apart), or max_wait elapses. For a live worker the title
+    becomes the watch command and holds; for an exited worker it flips to the
+    command and back to the shell prompt, then holds."""
+    def title():
+        try:
+            return herdr("pane", "get", pane_id).get("pane", {}).get("terminal_title", "")
+        except HerdrError:
+            return None
+    first = title()
+    changed, same, last = False, 0, first
+    deadline = time.time() + max_wait
+    while time.time() < deadline:
+        time.sleep(1.0)
+        t = title()
+        if t != first:
+            changed = True
+        same = same + 1 if t == last else 0
+        last = t
+        if changed and same >= hold:
+            return True
+    return False
+
+
 def pane_alive(pane_id):
     try:
         herdr("pane", "get", pane_id)
@@ -279,9 +305,11 @@ def do_sync(payload):
                 herdr("pane", "run", pane_id,
                       f"echo 'herdr_sync: dispatch.py not found; set AGENT_TASKS_DISPATCH'")
                 notes.append(f"tab {tab_id} (no dispatch.py found)")
-            # herdr clears a reported agent when the pane's foreground process
-            # changes; let the watch process settle before the first report
-            time.sleep(1.5)
+            # herdr clears a reported agent whenever it notices the pane's
+            # foreground process changed -- and it notices on its own poll,
+            # possibly seconds after `pane run`. Report only once herdr's view
+            # of the pane has settled (title changed, then held still).
+            settle_pane(pane_id)
 
         # 2. sidebar state -- reported on EVERY sync, not just on change: herdr's
         # own process detection can wipe a reported agent, and a re-report heals it
