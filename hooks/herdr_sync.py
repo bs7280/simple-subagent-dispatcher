@@ -167,9 +167,13 @@ def resolve_dispatch():
     return sorted(cands, key=ver)[-1] if cands else None
 
 
+def watch_argv(dispatch, wid):
+    runner = ["uv", "run", "python"] if shutil.which("uv") else ["python3"]
+    return [*runner, dispatch, "watch", wid, "--follow"]
+
+
 def watch_command(dispatch, wid):
-    runner = "uv run python" if shutil.which("uv") else "python3"
-    return f"{runner} {sh_quote(dispatch)} watch {sh_quote(wid)} --follow"
+    return " ".join(sh_quote(a) for a in watch_argv(dispatch, wid))
 
 
 def sh_quote(s):
@@ -338,8 +342,14 @@ def do_sync(payload):
         else:
             detail = act.get("last_tool") or ("starting" if phase == "start" else "working")
         msg = f"{tid}" + (f" {title[:48]}" if title else "") + f" — {detail}"
-        herdr("pane", "report-agent", st["pane_id"], "--source", "agent-tasks",
-              "--agent", wid, "--state", state, "--message", msg)
+        report = ["pane", "report-agent", st["pane_id"], "--source", "agent-tasks",
+                  "--agent", wid, "--state", state, "--message", msg]
+        dispatch = resolve_dispatch()
+        if dispatch and phase != "exited":
+            # herdr relaunches this after a server restart (its RESUME_ARG),
+            # so a live worker's watch pane survives `herdr server stop`
+            report += ["--", *watch_argv(dispatch, wid)]
+        herdr(*report)
         if (st.get("state"), st.get("msg")) != (state, msg):
             st["state"], st["msg"] = state, msg
             save_state(queue, wid, st)
@@ -368,6 +378,10 @@ def do_sync(payload):
                 and not os.environ.get("HERDR_SYNC_NO_RESUME"):
             if wait_for_shell(st["pane_id"]):
                 try:
+                    # (herdr drops a reported agent once the pane is back at a
+                    # bare shell -- an agent is a process to it -- so an exited
+                    # worker is carried by the tab label + notification, not a
+                    # sidebar row; re-reporting here does not stick)
                     herdr("pane", "send-text", st["pane_id"],
                           f"claude --resume {w['session_id']}")
                     st["resume_prefilled"] = True

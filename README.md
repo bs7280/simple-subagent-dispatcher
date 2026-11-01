@@ -633,6 +633,17 @@ dispatched workers are detached `claude -p` processes — so the plugin ships
   Don't do this while the dispatcher's own `resume` is running the same
   session headlessly: two processes on one transcript.
 
+Two herdr facts shape the edges. An agent row is a *process* to herdr: once a
+worker has exited and its watch pane is back at the shell, the row goes away
+and the tab label + notification carry the outcome (live workers keep their
+row through the exit tick). And `herdr server stop` kills every pane process
+(shells, interactive Claude sessions, watch panes) but **not** dispatched
+workers, which are not herdr children; on restart herdr restores the layout,
+relaunches interactive Claude panes via their session ids
+(`[session] resume_agents_on_restore`), and relaunches live workers' watch
+panes because the hook registers the watch command as the pane's resume
+command — the next sync tick re-reports their rows.
+
 Start the herdr server from a plain terminal, not from inside a Claude Code
 session: panes inherit the server's environment, and a worker or interactive
 Claude that inherits `CLAUDE_*` variables from a parent session is treated as a
