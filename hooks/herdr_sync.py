@@ -318,7 +318,7 @@ def do_sync(payload):
             pane_id = res["root_pane"]["pane_id"]
             tab_id = res["tab"]["tab_id"]
             st.update({"workspace_id": ws_id, "tab_id": tab_id, "pane_id": pane_id,
-                       "label": label, "repo": repo, "task": tid})
+                       "label": label, "repo": repo, "task": tid, "just_created": True})
             save_state(queue, wid, st)
             dispatch = resolve_dispatch()
             if dispatch:
@@ -333,6 +333,22 @@ def do_sync(payload):
             # possibly seconds after `pane run`. Report only once herdr's view
             # of the pane has settled (title changed, then held still).
             settle_pane(pane_id)
+
+        # 1b. self-heal: the pane exists but nothing is watching in it (herdr
+        # server restart without a resume command, someone ctrl+c'd it, ...)
+        # -> run the watch again while the worker is alive
+        if phase != "exited" and not st.get("just_created"):
+            try:
+                title = herdr("pane", "get", st["pane_id"]).get("pane", {}).get("terminal_title", "") or ""
+            except HerdrError:
+                title = ""
+            if " watch " not in title and "dispatch" not in title:
+                dispatch = resolve_dispatch()
+                if dispatch:
+                    herdr("pane", "run", st["pane_id"], watch_command(dispatch, wid))
+                    settle_pane(st["pane_id"])
+                    notes.append("watch relaunched")
+        st.pop("just_created", None)
 
         # 2. sidebar state -- reported on EVERY sync, not just on change: herdr's
         # own process detection can wipe a reported agent, and a re-report heals it
