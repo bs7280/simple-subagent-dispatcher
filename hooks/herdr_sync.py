@@ -48,6 +48,9 @@ Env:
   AGENT_TASKS_DISPATCH   path to dispatch.py (default: this plugin's scripts/dispatch.py,
                          else the newest installed plugin cache version)
   HERDR_SYNC_NO_NOTIFY   set to disable the exit notification
+  HERDR_SYNC_NO_RESUME   set to not pre-type `claude --resume <session>` into the
+                         worker's pane when it exits (Enter continues the worker's
+                         conversation interactively, in its cwd)
 """
 
 import glob
@@ -247,6 +250,22 @@ def settle_pane(pane_id, max_wait=12.0, hold=2):
     return False
 
 
+def wait_for_shell(pane_id, max_wait=20.0):
+    """True once the pane's foreground is no longer the watch command (its
+    title stops mentioning ' watch '), i.e. the shell prompt is back."""
+    deadline = time.time() + max_wait
+    while True:
+        try:
+            title = herdr("pane", "get", pane_id).get("pane", {}).get("terminal_title", "") or ""
+        except HerdrError:
+            return False
+        if " watch " not in title and "dispatch" not in title:
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(1.0)
+
+
 def pane_alive(pane_id):
     try:
         herdr("pane", "get", pane_id)
@@ -341,6 +360,23 @@ def do_sync(payload):
                     notes.append(f"notify failed: {e}")
             st["notified"] = True
             save_state(queue, wid, st)
+
+        # 4. exit: once the watch process has given the pane back to the shell,
+        # pre-type `claude --resume <session>` (no Enter) so one keystroke
+        # continues the worker's full conversation interactively, in its cwd
+        if phase == "exited" and not st.get("resume_prefilled") and w.get("session_id") \
+                and not os.environ.get("HERDR_SYNC_NO_RESUME"):
+            if wait_for_shell(st["pane_id"]):
+                try:
+                    herdr("pane", "send-text", st["pane_id"],
+                          f"claude --resume {w['session_id']}")
+                    st["resume_prefilled"] = True
+                    save_state(queue, wid, st)
+                    notes.append("resume prefilled")
+                except HerdrError as e:
+                    notes.append(f"prefill failed: {e}")
+            else:
+                notes.append("watch still running; resume not prefilled")
     except HerdrError as e:
         notes.append(f"error: {e}")
     except (KeyError, TypeError) as e:

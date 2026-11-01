@@ -624,8 +624,19 @@ dispatched workers are detached `claude -p` processes — so the plugin ships
   `herdr pane report-agent`: `start`/`running` → working, exited `review`/`ended`
   → idle (herdr shows **done** until you look), exited `blocked: …`/`died` →
   blocked (rolls up to the tab and workspace);
-- on exit it relabels the tab (`✓ review`, `⏸ blocked…`, `✗ died`) and fires a
-  herdr notification (`HERDR_SYNC_NO_NOTIFY=1` to silence).
+- on exit it relabels the tab (`✓ review`, `⏸ blocked…`, `✗ died`), fires a
+  herdr notification (`HERDR_SYNC_NO_NOTIFY=1` to silence), and once the
+  watch has handed the pane back to the shell it pre-types
+  `claude --resume <session-id>` there — press Enter to continue the worker's
+  full conversation interactively, in its cwd (`HERDR_SYNC_NO_RESUME=1` to
+  skip). Works the same for a worker you stopped with `dispatch stop`.
+  Don't do this while the dispatcher's own `resume` is running the same
+  session headlessly: two processes on one transcript.
+
+Start the herdr server from a plain terminal, not from inside a Claude Code
+session: panes inherit the server's environment, and a worker or interactive
+Claude that inherits `CLAUDE_*` variables from a parent session is treated as a
+nested child.
 
 Wire it once per machine, in the user layer, and every queue gets it:
 
