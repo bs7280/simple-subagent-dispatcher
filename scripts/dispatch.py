@@ -335,33 +335,58 @@ def hook_payload(root, event, phase, wid, w, outcome=None, outbox=None, changed=
     }
 
 
+PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def expand_hook_argv(argv):
+    """`{plugin}` in a hook argv element -> this plugin's root directory, so a
+    machine-wide config can point at a hook the plugin ships (hooks/*.py)
+    without hardcoding the versioned install path."""
+    return [a.replace("{plugin}", PLUGIN_ROOT) if isinstance(a, str) else a for a in argv]
+
+
 def run_hook(root, cfg, key, payload, wid):
-    """Run config[key] (argv) with the payload on stdin. Returns (ok, text).
-    Never raises: a missing/crashing hook is reported, not propagated."""
-    argv = cfg.get(key)
-    if not argv:
+    """Run every hook under config[key] (one argv, or a list of argvs -- see
+    tasks.load_config) with the payload on stdin, in order. Returns (ok, text):
+    ok is True only when all ran clean; text joins their outputs. A failing
+    seed hook stops the chain (its failure aborts the dispatch anyway); sync
+    hooks all run regardless, each best-effort. Never raises: a missing/
+    crashing hook is reported, not propagated."""
+    hooks = tasks.normalize_hooks(cfg.get(key))
+    if not hooks:
         return None, ""
-    argv = list(argv) if isinstance(argv, list) else [argv]
     env = dict(os.environ)
     env["AGENT_TASKS_DIR"] = root
     env["AGENT_TASKS_HOOK"] = key
     log_path = os.path.join(ensure_runtime(root), "logs", f"{wid}.out")
     stamp = f"{payload['event']}/{payload['phase']}"
-    try:
-        res = subprocess.run(argv, cwd=repo_of(root), env=env,
-                             input=json.dumps(payload), capture_output=True,
-                             text=True, timeout=float(cfg.get("hook_timeout_seconds") or 120))
-        ok, out = res.returncode == 0, (res.stdout + res.stderr).strip()
+    payload_json = json.dumps(payload)
+    all_ok, outs = True, []
+    for argv in hooks:
+        argv = expand_hook_argv(argv)
+        try:
+            res = subprocess.run(argv, cwd=repo_of(root), env=env,
+                                 input=payload_json, capture_output=True,
+                                 text=True, timeout=float(cfg.get("hook_timeout_seconds") or 120))
+            ok, out = res.returncode == 0, (res.stdout + res.stderr).strip()
+            if not ok:
+                out = f"exit {res.returncode}: {out}"
+        except subprocess.TimeoutExpired:
+            ok, out = False, f"timed out after {cfg.get('hook_timeout_seconds')}s"
+        except OSError as e:
+            ok, out = False, f"could not run {argv[0]}: {e}"
+        label = f" [{os.path.basename(str(argv[-2] if len(argv) > 1 else argv[0]))}]" \
+            if len(hooks) > 1 else ""
+        with open(procs.long_path(log_path), "a", encoding="utf-8") as f:
+            f.write(f"\n=== {tasks.now()} {key}{label} {stamp} "
+                    f"{'ok' if ok else 'FAILED'}\n{out}\n")
+        if out:
+            outs.append(out)
         if not ok:
-            out = f"exit {res.returncode}: {out}"
-    except subprocess.TimeoutExpired:
-        ok, out = False, f"timed out after {cfg.get('hook_timeout_seconds')}s"
-    except OSError as e:
-        ok, out = False, f"could not run {argv[0]}: {e}"
-    with open(procs.long_path(log_path), "a", encoding="utf-8") as f:
-        f.write(f"\n=== {tasks.now()} {key} {stamp} "
-                f"{'ok' if ok else 'FAILED'}\n{out}\n")
-    return ok, out
+            all_ok = False
+            if key == "seed_hook":
+                break
+    return all_ok, "\n".join(outs)
 
 
 def sync_worker(root, cfg, wid, w, phase, outcome=None, outbox=None, changed=True):
@@ -1224,7 +1249,8 @@ def cmd_sync(args):
     root = tasks.find_dir()
     cfg = load_config(root)
     if not cfg.get("sync_hook"):
-        tasks.die("no sync_hook configured in .agent-tasks/config.json "
+        tasks.die("no sync_hook configured in ~/.config/agent-tasks/config.json, "
+                  ".agent-tasks/config.json "
                   "(or config.local.json)")
     workers = load_workers(root)
     if args.worker:

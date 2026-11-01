@@ -179,6 +179,25 @@ claude binary specifically the full ladder is:
 Config never replaces resolution: configuring the *name* `claude` still
 resolves to the shim and still gets the unwrap/stdin treatment.
 
+There is a third layer **under** both, for things you want on every queue on
+a machine: `~/.config/agent-tasks/config.json` (`$XDG_CONFIG_HOME` honored;
+`AGENT_TASKS_USER_CONFIG=<path>` overrides, `=""` disables). Same keys. The
+full merge is
+
+```
+defaults  <-  ~/.config/agent-tasks/config.json  <-  config.json  <-  config.local.json
+              (machine-wide)                         (project)        (machine, this repo)
+```
+
+with one twist: **`seed_hook` / `sync_hook` accumulate instead of
+overriding.** Each may be one argv or a list of argvs; every layer's hooks are
+appended to the inherited ones (exact duplicates dropped), and a layer that
+sets the key to `null` clears what it inherited. So a machine-wide viewer hook
+(see [herdr](#seeing-workers-in-herdr) below) and a project's tracker hook both
+run, and no repo needs to know about the other. `{plugin}` inside a hook argv
+expands to the installed plugin's root, so a user-level config can point at a
+hook the plugin ships without hardcoding the versioned cache path.
+
 ### In-place vs. worktree — the project's call
 
 By default workers run **in the repo checkout**. `--worktree` gives each worker
@@ -455,6 +474,10 @@ whatever happened to still be in a transcript.
   blocked on what, who's working on what.
 - **`scripts/dispatch.py`** — the dispatcher (see above): headless workers as
   durable, watchable, resumable `claude -p` sessions.
+- **`hooks/herdr_sync.py`** — an optional `sync_hook` that shows dispatched
+  workers in the [herdr](https://herdr.dev) sidebar (see *Seeing workers in
+  herdr*). Wire it in `~/.config/agent-tasks/config.json` with
+  `{plugin}/hooks/herdr_sync.py`.
 
 ## The wrapper-task pattern (meeting an existing tracker)
 
@@ -578,6 +601,49 @@ Machine paths belong in `config.local.json`, the gitignored overlay:
  "sync_hook": ["uv", "run", "/path/to/my_tracker_bridge.py", "sync"],
  "sync_interval_seconds": 60}
 ```
+
+Several hooks? Give a list of argvs (`"sync_hook": [["…"], ["…"]]`), or put the
+machine-wide ones in `~/.config/agent-tasks/config.json` — hook keys
+accumulate across layers (see *Config* above). All sync hooks run, each
+best-effort; a failing seed hook stops the seed chain and aborts the dispatch.
+With more than one hook, each gets its own `sync_hook [name]` entry in the
+spawn log.
+
+### Seeing workers in herdr
+
+[herdr](https://herdr.dev) is a terminal multiplexer for coding agents (a
+persistent server, a TUI, and a sidebar that shows each agent as idle /
+working / blocked / done). It cannot adopt a process it did not start, and
+dispatched workers are detached `claude -p` processes — so the plugin ships
+`hooks/herdr_sync.py`, a `sync_hook` that makes them visible anyway:
+
+- on a worker's first sync it finds-or-creates the herdr **workspace** for the
+  repo and opens a **tab** in it, labelled `<worker-id> <TASK-ID>`, running
+  `dispatch.py watch <worker-id> --follow` (the merged transcript + spawn log);
+- on every sync it pushes the queue's own view into the sidebar via
+  `herdr pane report-agent`: `start`/`running` → working, exited `review`/`ended`
+  → idle (herdr shows **done** until you look), exited `blocked: …`/`died` →
+  blocked (rolls up to the tab and workspace);
+- on exit it relabels the tab (`✓ review`, `⏸ blocked…`, `✗ died`) and fires a
+  herdr notification (`HERDR_SYNC_NO_NOTIFY=1` to silence).
+
+Wire it once per machine, in the user layer, and every queue gets it:
+
+```json
+{"sync_hook": ["uv", "run", "{plugin}/hooks/herdr_sync.py", "sync"],
+ "sync_interval_seconds": 60}
+```
+
+(`python3` works in place of `uv run`; the hook is stdlib-only.) It is
+best-effort end to end: no herdr binary, no running server, or any herdr
+error is a line in the worker's spawn log and the hook still exits 0, so the
+config is safe to carry to a machine without herdr. `uv run
+{plugin-root}/hooks/herdr_sync.py doctor` prints the binary, the `dispatch.py`
+it will run, server status and live workspaces; `… open <repo>` finds-or-creates
+a repo's workspace from a script. Sidebar state moves while a supervisor is
+running (`dispatch wait` / `watch --follow` / `tasks await`), or on demand with
+`dispatch sync`. Pre-0.10 configs that chained two hooks with
+`herdr_sync.py sync --chain <argv…>` still work.
 
 What this buys: the same worker prompt works for a Claude Code session, a
 different harness, or a locked-down sandbox with no network — the worker only

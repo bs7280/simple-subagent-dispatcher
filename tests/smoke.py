@@ -40,6 +40,7 @@ def cli_env(cwd, **overrides):
     to be ambient."""
     env = dict(os.environ)
     env["AGENT_TASKS_DIR"] = os.path.join(cwd, ".agent-tasks")
+    env["AGENT_TASKS_USER_CONFIG"] = ""  # the dev machine's ~/.config layer must not leak in
     env.update(overrides)
     return env
 
@@ -563,6 +564,78 @@ def test_config_overlay(tmp):
 
 
 
+def test_user_config_layer(tmp):
+    """Three layers: user (machine-wide) <- config.json <- config.local.json.
+    Plain keys: later wins. Hook keys: accumulate, dedup, null clears."""
+    sys.path.insert(0, SCRIPTS_DIR)
+    import tasks as T
+    root = os.path.join(tmp, ".agent-tasks")
+    os.makedirs(root, exist_ok=True)
+    user_cfg = os.path.join(tmp, "user-config.json")
+
+    def write(path, obj):
+        with open(path, encoding="utf-8", mode="w") as f:
+            json.dump(obj, f)
+
+    def load(**env):
+        bak = {k: os.environ.get(k) for k in ("AGENT_TASKS_USER_CONFIG", "XDG_CONFIG_HOME")}
+        try:
+            os.environ["AGENT_TASKS_USER_CONFIG"] = ""
+            os.environ.update(env)
+            return T.load_config(root)
+        finally:
+            for k, v in bak.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    write(user_cfg, {"lease_minutes": 7, "sync_hook": ["viewer", "sync"],
+                     "seed_hook": "seed-everywhere"})
+    write(os.path.join(root, "config.json"), {"lease_minutes": 9,
+                                              "sync_hook": [["tracker", "sync"]]})
+    # user layer alone
+    cfg = load(AGENT_TASKS_USER_CONFIG=user_cfg)
+    if cfg["lease_minutes"] != 9:
+        fail(f"project config should override the user layer for plain keys: {cfg['lease_minutes']}")
+    if cfg["sync_hook"] != [["viewer", "sync"], ["tracker", "sync"]]:
+        fail(f"hooks should accumulate user -> project, in order: {cfg['sync_hook']}")
+    if cfg["seed_hook"] != [["seed-everywhere"]]:
+        fail(f"a bare string hook should normalize to one argv: {cfg['seed_hook']}")
+    # disabled user layer: only the project's hook
+    cfg = load()
+    if cfg["sync_hook"] != [["tracker", "sync"]] or cfg["seed_hook"] != []:
+        fail(f"AGENT_TASKS_USER_CONFIG='' must disable the user layer: {cfg['sync_hook']} {cfg['seed_hook']}")
+    # local overlay: duplicate dropped, extra appended, null clears
+    write(os.path.join(root, "config.local.json"),
+          {"sync_hook": [["tracker", "sync"], ["local-only"]], "seed_hook": None})
+    cfg = load(AGENT_TASKS_USER_CONFIG=user_cfg)
+    if cfg["sync_hook"] != [["viewer", "sync"], ["tracker", "sync"], ["local-only"]]:
+        fail(f"duplicate hook should be dropped, new one appended: {cfg['sync_hook']}")
+    if cfg["seed_hook"] != []:
+        fail(f"null in a later layer must clear inherited hooks: {cfg['seed_hook']}")
+    # XDG default location when the env var is unset
+    xdg = os.path.join(tmp, "xdg")
+    os.makedirs(os.path.join(xdg, "agent-tasks"))
+    write(os.path.join(xdg, "agent-tasks", "config.json"), {"sync_hook": ["xdg-viewer"]})
+    os.environ.pop("AGENT_TASKS_USER_CONFIG", None)
+    bak = os.environ.get("XDG_CONFIG_HOME")
+    os.environ["XDG_CONFIG_HOME"] = xdg
+    try:
+        cfg = T.load_config(root)
+    finally:
+        if bak is None:
+            os.environ.pop("XDG_CONFIG_HOME", None)
+        else:
+            os.environ["XDG_CONFIG_HOME"] = bak
+    if cfg["sync_hook"][0] != ["xdg-viewer"]:
+        fail(f"$XDG_CONFIG_HOME/agent-tasks/config.json should be the default user layer: {cfg['sync_hook']}")
+    os.remove(os.path.join(root, "config.json"))
+    os.remove(os.path.join(root, "config.local.json"))
+    if T.normalize_hooks(None) != [] or T.normalize_hooks([]) != []:
+        fail("normalize_hooks: empty forms must be []")
+
+
 def test_journal(tmp):
     """Every mutation lands in the journal, and `since` answers "what changed
     after this cursor" without re-reading the board or any note."""
@@ -960,6 +1033,7 @@ def main():
     tests = (test_lifecycle, test_leases, test_tiers, test_resources,
              test_doctor, test_mutex, test_concurrent_logs,
              test_utf8_discipline, test_note_append, test_config_overlay,
+             test_user_config_layer,
              test_journal, test_await_wakes_only_on_decisions,
              test_await_quiet_and_blocked, test_supervisor_lease,
              test_handoff, test_remote, test_delete, test_ambient_env_untouched)

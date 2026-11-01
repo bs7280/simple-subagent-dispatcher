@@ -116,23 +116,71 @@ def detect_runner():
     return [sys.executable or "python3"]
 
 
+HOOK_KEYS = ("seed_hook", "sync_hook")
+USER_CONFIG_ENV = "AGENT_TASKS_USER_CONFIG"
+
+
+def user_config_path():
+    """The machine-wide config layer: $AGENT_TASKS_USER_CONFIG (empty string =
+    disabled), else $XDG_CONFIG_HOME/agent-tasks/config.json, else
+    ~/.config/agent-tasks/config.json. Same keys as config.json; applies to
+    every queue on the machine. Hooks you want everywhere (a viewer such as
+    herdr, a notifier) live here, project policy stays in the repo."""
+    env = os.environ.get(USER_CONFIG_ENV)
+    if env is not None:
+        return env or None
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "agent-tasks", "config.json")
+
+
+def normalize_hooks(value):
+    """A hook key holds ONE argv (list of str, or a bare command string) or a
+    LIST of argvs. Returns the list-of-argvs form; None / [] -> []."""
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [[value]]
+    if isinstance(value, list) and all(isinstance(x, str) for x in value):
+        return [list(value)]
+    return [list(h) if isinstance(h, list) else [str(h)] for h in value]
+
+
 def load_config(root):
-    """Defaults <- config.json (project, committed) <- config.local.json
-    (machine, gitignored). The local overlay merges key-by-key and may
-    override ANY config key -- machine facts (claude_bin, runner paths)
-    don't belong in shared project config."""
+    """Defaults <- user config (machine-wide, ~/.config/agent-tasks/config.json)
+    <- config.json (project, committed) <- config.local.json (machine,
+    gitignored). Later layers merge key-by-key and may override ANY key --
+    machine facts (claude_bin, runner paths) don't belong in shared project
+    config. EXCEPT the hook keys (seed_hook, sync_hook), which ACCUMULATE: a
+    layer's hooks are appended to the inherited ones (duplicates dropped), so
+    a machine-wide viewer hook and a project's tracker hook both run. A layer
+    that sets a hook key to null clears everything inherited below it."""
     cfg = dict(CONFIG_DEFAULTS)
-    for name in ("config.json", "config.local.json"):
-        path = os.path.join(root, name)
-        if os.path.isfile(path):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    user = json.load(f)
-            except ValueError as e:
-                die(f"bad {path}: {e}")
-            for key in cfg:
-                if key in user:
-                    cfg[key] = user[key]
+    for key in HOOK_KEYS:
+        cfg[key] = []
+    layers = []
+    user_path = user_config_path()
+    if user_path:
+        layers.append(user_path)
+    layers += [os.path.join(root, name) for name in ("config.json", "config.local.json")]
+    for path in layers:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                user = json.load(f)
+        except ValueError as e:
+            die(f"bad {path}: {e}")
+        for key in cfg:
+            if key not in user:
+                continue
+            if key in HOOK_KEYS:
+                if user[key] is None:
+                    cfg[key] = []
+                else:
+                    cfg[key] = cfg[key] + [h for h in normalize_hooks(user[key])
+                                           if h not in cfg[key]]
+            else:
+                cfg[key] = user[key]
     if not cfg["runner"]:
         cfg["runner"] = detect_runner()
     return cfg
@@ -612,7 +660,12 @@ Machine-managed task queue shared by planner and worker agents
 - `config.local.json` -- optional machine-local overlay, merged key-by-key
   over `config.json` (gitignored by init). Any key may be overridden; put
   machine facts here (claude_bin path, runner), project policy in
-  config.json.
+  config.json. A third, machine-WIDE layer sits under both:
+  `~/.config/agent-tasks/config.json` (or `$AGENT_TASKS_USER_CONFIG`) --
+  same keys, applies to every queue on the machine. `seed_hook`/`sync_hook`
+  accumulate across layers (each may be one argv or a list of argvs; `null`
+  clears inherited ones), so a machine-wide viewer hook (e.g. herdr) and a
+  project's tracker hook both run.
 - `events.jsonl` -- append-only journal: one line per mutation (seq, ts,
   task, kind, agent, msg). Read a delta with `tasks since --cursor N` instead
   of re-reading the board and every note; `tasks await` watches it.

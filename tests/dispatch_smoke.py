@@ -100,6 +100,7 @@ def run_all(tmp):
     # CLAUDECODE set on purpose: the dispatcher must strip it from workers
     env = {**os.environ, "CLAUDECODE": "1"}
     env.pop("AGENT_TASKS_DIR", None)
+    env["AGENT_TASKS_USER_CONFIG"] = ""  # the dev machine's ~/.config layer must not leak in
     # transcripts are looked up under CLAUDE_CONFIG_DIR/projects first: the
     # test plants fake ones there instead of touching ~/.claude
     env["CLAUDE_CONFIG_DIR"] = os.path.join(tmp, "claude-config")
@@ -400,6 +401,10 @@ def run_all(tmp):
                                 "--json"],
                                cwd=repo, env=env, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
+    time.sleep(1.0)  # the watcher must record its journal cursor BEFORE the
+    # resumed stub (which reviews instantly) is folded, or the review is
+    # "pre-existing" to it and it sits quiet until timeout -- a load-dependent
+    # race, not a product bug
     res = disp("wait", ww, check=False)
     if res.returncode != 0:
         fail(f"resumed worker should finish clean, rc={res.returncode}: {res.stdout}")
@@ -745,6 +750,48 @@ def run_all(tmp):
         fail("dispatch sync should have fired the hook again")
     if "no running workers" not in disp("sync").stdout:
         fail("dispatch sync with nothing running should say so")
+
+    # ---- hook LISTS + the machine-wide user layer + {plugin} expansion: a
+    # user-level viewer hook and the project's tracker hook both run, in
+    # order; `{plugin}` in an argv resolves to the plugin root. ----
+    user_hook = os.path.join(tmp, "user_hook.py")
+    with open(user_hook, "w", encoding="utf-8") as f:
+        f.write("import json, os, sys\n"
+                "payload = json.load(sys.stdin)\n"
+                "with open(os.environ['FAKE_HOOK_LOG'], 'a', encoding='utf-8') as f:\n"
+                "    f.write(json.dumps({'kind': 'user-sync', 'plugin': sys.argv[1],\n"
+                "                        'payload': payload}) + '\\n')\n"
+                "print('user hook saw', payload['worker']['id'])\n")
+    user_cfg = os.path.join(tmp, "user-config.json")
+    with open(user_cfg, "w", encoding="utf-8") as f:
+        json.dump({"sync_hook": [PY, user_hook, "{plugin}"]}, f)
+    env["AGENT_TASKS_USER_CONFIG"] = user_cfg
+    set_cfg("chatty", seed_hook=[PY, hook, "seed"],
+            sync_hook=[[PY, hook, "sync"]],  # list-of-argvs form
+            sync_interval_seconds=1)
+    tu = tasksc("create", "Two-hook task", "--remote", "tracker://item/8").stdout.split()[1]
+    n_before = len(hook_records())
+    res = disp("start", tu)
+    wu = started_id(res)
+    if "user hook saw" not in res.stdout or f"synced {wu} (start)" not in res.stdout:
+        fail(f"start should report the user-level hook's output: {res.stdout}")
+    disp("wait", wu, check=False)
+    recs = hook_records()[n_before:]
+    kinds = [(r["kind"], r["payload"]["phase"]) for r in recs]
+    if kinds[:3] != [("seed", "start"), ("user-sync", "start"), ("sync", "start")]:
+        fail(f"user hook (lower layer) should run before the project hook: {kinds}")
+    plugin_root = os.path.dirname(HERE)
+    seen = {r["plugin"] for r in recs if r["kind"] == "user-sync"}
+    if seen != {plugin_root}:
+        fail(f"{{plugin}} should expand to the plugin root {plugin_root}: {seen}")
+    if not any(k == ("user-sync", "exited") for k in kinds) or \
+            not any(k == ("sync", "exited") for k in kinds):
+        fail(f"both hooks should see the exited sync: {kinds}")
+    if "sync_hook [user_hook.py]" not in log_text(wu) or "sync_hook [fake_hook.py]" not in log_text(wu):
+        fail(f"multi-hook log entries should name the hook: {log_text(wu)[-600:]}")
+    env["AGENT_TASKS_USER_CONFIG"] = ""
+    set_cfg("chatty", seed_hook=[PY, hook, "seed"], sync_hook=[PY, hook, "sync"],
+            sync_interval_seconds=1)
 
     # ---- `tasks await` supervises dispatched workers: heartbeat + sync while
     # alive, fold on exit. Before 0.8.3 it did none of that: a clean
