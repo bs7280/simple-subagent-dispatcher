@@ -21,7 +21,7 @@ start, so this script runs as the plugin's `sync_hook` and does two things:
          exited: review|ended -> idle   (herdr shows "done" until you look at it)
          exited: blocked:*    -> blocked
          exited: died         -> blocked (needs a human either way)
-     and on exit shows a herdr notification.
+     and on exit shows a herdr notification (with a sound only for blocked/died).
 
 herdr is best-effort: no server running, no `herdr` on PATH, or any herdr error
 is logged to stdout and the hook still exits 0. A `--chain <argv...>` runs another
@@ -362,7 +362,8 @@ def do_sync(payload):
             except HerdrError as e:
                 notes.append(f"rename failed: {e}")
             if not os.environ.get("HERDR_SYNC_NO_NOTIFY"):
-                sound = "done" if state == "idle" else "request"
+                # sound only when a human is needed; a clean review is a silent toast
+                sound = "none" if state == "idle" else "request"
                 try:
                     herdr("notification", "show", f"{wid}: {outcome or 'ended'}",
                           "--body", f"{tid} {title}".strip(), "--sound", sound)

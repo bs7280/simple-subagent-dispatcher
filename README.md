@@ -625,7 +625,8 @@ dispatched workers are detached `claude -p` processes — so the plugin ships
   → idle (herdr shows **done** until you look), exited `blocked: …`/`died` →
   blocked (rolls up to the tab and workspace);
 - on exit it relabels the tab (`✓ review`, `⏸ blocked…`, `✗ died`), fires a
-  herdr notification (`HERDR_SYNC_NO_NOTIFY=1` to silence), and once the
+  herdr notification, silent for a clean review and with a sound for
+  blocked/died (`HERDR_SYNC_NO_NOTIFY=1` to drop it), and once the
   watch has handed the pane back to the shell it pre-types
   `claude --resume <session-id>` there — press Enter to continue the worker's
   full conversation interactively, in its cwd (`HERDR_SYNC_NO_RESUME=1` to
